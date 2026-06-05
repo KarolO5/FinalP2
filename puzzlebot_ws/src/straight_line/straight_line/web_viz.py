@@ -74,8 +74,8 @@ HTML = b"""<!DOCTYPE html>
     <h1>PuzzleBot &mdash; Vision</h1>
     <div class="btns">
       <button onclick="setStream('raw')"      id="btn-raw">RAW</button>
-      <button onclick="setStream('linea')"    id="btn-linea">LÍNEA</button>
-      <button onclick="setStream('semaforo')" id="btn-semaforo">SEMÁFORO</button>
+      <button onclick="setStream('linea')"    id="btn-linea">L&Iacute;NEA</button>
+      <button onclick="setStream('semaforo')" id="btn-semaforo">SEM&Aacute;FORO</button>
     </div>
     <div class="badge">viendo: <span id="label">raw</span></div>
   </header>
