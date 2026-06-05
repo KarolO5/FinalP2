@@ -1,194 +1,174 @@
 #!/usr/bin/env python3
 # =============================================================================
-# line_follower_cv.py
+# line_follower_cv.py  —  Seguidor de línea por contorno + PID
 # =============================================================================
-# Seguidor de línea negra con OpenCV + controlador PD.
 #
-# ROI activa: 40% inferior del frame, ignorando 30% de cada lado lateral.
-# Zona analizada = 40% central del ancho del frame.
-#
-#  ┌──────────────────────────────────────────┐
-#  │              zona ignorada               │  60% superior
-#  ├───────┬─────────────────┬────────────────┤
-#  │  30%  │   ZONA ACTIVA   │      30%       │  40% inferior
-#  │ ignor │   (N columnas)  │    ignorado    │
-#  └───────┴─────────────────┴────────────────┘
+# ESTRATEGIA DE DETECCIÓN
+# ───────────────────────
+# 1. Se recorta una ROI del porcentaje inferior del frame.
+# 2. Se convierte a escala de grises y se aplica umbral adaptativo gaussiano
+#    (se adapta a cambios de iluminación en el piso).
+# 3. Se aplica cierre morfológico para rellenar huecos en la línea.
+# 4. Se buscan contornos externos y se selecciona el de mayor área.
+# 5. Se calcula el centroide del contorno con momentos de imagen.
+# 6. El error es la distancia normalizada del centroide al centro horizontal.
+# 7. Un controlador PID convierte ese error en velocidad angular.
 #
 # TÓPICOS
+# ────────
 #   Sub : /image/raw         [sensor_msgs/Image]
-#   Sub : /odom              [nav_msgs/Odometry]
 #   Sub : /semaforo/estado   [std_msgs/String]
 #   Pub : /cmd_vel           [geometry_msgs/Twist]
 #   Pub : /vision/debug_img  [sensor_msgs/Image]
 #   Pub : /vision/error      [std_msgs/Float32]
 # =============================================================================
 
-import math
 import cv2
 import numpy as np
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from nav_msgs.msg       import Odometry
-from sensor_msgs.msg    import Image
-from std_msgs.msg       import Float32, String
-from cv_bridge          import CvBridge
-from rclpy.qos          import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from sensor_msgs.msg   import Image
+from std_msgs.msg      import Float32, String
+from cv_bridge         import CvBridge
+from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARÁMETROS
+# PARÁMETROS  —  ajusta sin tocar la lógica
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Robot
-WHEEL_RADIUS = 0.0525
-WHEEL_BASE   = 0.164
-MAX_LINEAR   = 0.20
-MAX_ANGULAR  = 0.35
-LINEAR_VEL   = 0.15
+# Velocidad base (m/s)
+LINEAR_VEL  = 0.15
+MAX_ANGULAR = 0.60
 
-# PD visual
-KP_VIS = 1.8
-KD_VIS = 0.25
+# PID visual (error normalizado [-1, 1])
+KP = 1.6
+KI = 0.04   # integral pequeña para compensar deriva en curvas largas
+KD = 0.30
+MAX_INTEGRAL = 0.40   # anti-windup
 
-# Visión — ROI
-ROI_FRACTION  = 0.40   # Fracción inferior del frame (alto)
-ROI_LEFT      = 0.30   # Ignorar 30% desde el borde izquierdo
-ROI_RIGHT     = 0.70   # Ignorar 30% desde el borde derecho
-N_COLS        = 8      # Columnas en la zona activa
-BLUR_K        = 5      # Kernel Gaussian Blur (impar)
-THRESH_VAL    = 60     # Umbral binario inverso
-MIN_CELL_FILL = 0.05   # Densidad mínima para celda activa
+# ROI: fracción inferior del frame que se analiza
+ROI_TOP_FRAC = 0.55   # el ROI empieza en el 55 % del alto (toma el 45 % inferior)
 
-# Recovery
-RECOVERY_FRAMES = 20
-RECOVERY_OMEGA  = 0.25
+# Umbral adaptativo
+ADAPT_BLOCK = 31     # tamaño de bloque (impar, > 1)
+ADAPT_C     = 8      # constante sustraída a la media local
 
+# Morfología: cierre para unir trazos rotos de la línea
+MORPH_KSIZE = (9, 9)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UTILIDADES
-# ─────────────────────────────────────────────────────────────────────────────
+# Área mínima de contorno para considerarlo línea válida (px²)
+MIN_CONTOUR_AREA = 400
 
-def clamp(val: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, val))
-
-
-def yaw_from_quaternion(q) -> float:
-    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-    return math.atan2(siny_cosp, cosy_cosp)
+# Recovery si la línea se pierde
+RECOVERY_FRAMES = 25
+RECOVERY_OMEGA  = 0.20   # rad/s girando hacia la última dirección conocida
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DETECCIÓN POR GRILLA
+# DETECTOR
 # ─────────────────────────────────────────────────────────────────────────────
 
-class GridLineDetector:
+class ContourLineDetector:
+    """
+    Detecta la línea negra mediante contorno + momentos.
 
-    def __init__(self, n_cols: int = N_COLS,
-                 roi_frac: float = ROI_FRACTION,
-                 roi_left: float = ROI_LEFT,
-                 roi_right: float = ROI_RIGHT):
-        self.n_cols    = n_cols
-        self.roi_frac  = roi_frac
-        self.roi_left  = roi_left
-        self.roi_right = roi_right
+    Devuelve:
+        error_norm  : float [-1, 1]  (0 = centrada, + = línea a izquierda)
+        found       : bool
+        debug       : imagen BGR anotada
+    """
+
+    def __init__(self):
+        self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
 
     def process(self, frame: np.ndarray):
         h, w = frame.shape[:2]
 
-        # ── 1. Recortar ROI: zona inferior + zona central lateral ──────
-        roi_y0 = int(h * (1.0 - self.roi_frac))
-        x0_roi = int(w * self.roi_left)
-        x1_roi = int(w * self.roi_right)
+        # ── 1. ROI inferior ───────────────────────────────────────────
+        roi_y0 = int(h * ROI_TOP_FRAC)
+        roi    = frame[roi_y0:h, :]
 
-        roi           = frame[roi_y0:h, x0_roi:x1_roi]
-        roi_h, roi_w  = roi.shape[:2]
+        # ── 2. Umbral adaptativo sobre escala de grises ───────────────
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        mask = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,   # línea oscura → blanco
+            ADAPT_BLOCK, ADAPT_C,
+        )
 
-        # ── 2. Pipeline de umbralización ──────────────────────────────
-        gray    = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (BLUR_K, BLUR_K), 0)
-        _, mask = cv2.threshold(blurred, THRESH_VAL, 255, cv2.THRESH_BINARY_INV)
+        # ── 3. Cierre morfológico para rellenar huecos ────────────────
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
 
-        # ── 3. Grilla de N_COLS columnas ───────────────────────────────
-        col_w     = roi_w / self.n_cols
-        densities = np.zeros(self.n_cols, dtype=np.float32)
-        cell_pxls = roi_h * col_w
+        # ── 4. Contorno de mayor área ─────────────────────────────────
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-        for i in range(self.n_cols):
-            cx0           = int(i * col_w)
-            cx1           = int((i + 1) * col_w)
-            white_pixels  = np.count_nonzero(mask[:, cx0:cx1])
-            densities[i]  = white_pixels / cell_pxls
+        found      = False
+        cx_line    = w // 2   # fallback: centro del frame
+        best_cnt   = None
 
-        # ── 4. Centroide ponderado ─────────────────────────────────────
-        found  = densities.max() > MIN_CELL_FILL
-        active = densities > MIN_CELL_FILL
+        if contours:
+            best_cnt = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(best_cnt) >= MIN_CONTOUR_AREA:
+                M = cv2.moments(best_cnt)
+                if M['m00'] > 0:
+                    cx_line = int(M['m10'] / M['m00'])
+                    found   = True
 
-        if found and active.sum() > 0:
-            col_centers = np.array([(i + 0.5) * col_w for i in range(self.n_cols)])
-            weighted_cx = float(np.sum(col_centers[active] * densities[active]) /
-                                np.sum(densities[active]))
-        else:
-            weighted_cx = roi_w / 2.0
+        # Error normalizado: 0 = centrado, +1 = línea extremo izquierdo
+        error_norm = float((w / 2 - cx_line) / (w / 2))
 
-        # Error normalizado respecto al centro de la zona activa
-        error_norm = (roi_w / 2.0 - weighted_cx) / (roi_w / 2.0)
-
-        # ── 5. Frame de depuración ─────────────────────────────────────
+        # ── 5. Frame de depuración ────────────────────────────────────
         debug = frame.copy()
 
-        # Oscurecer zonas ignoradas izquierda y derecha
-        overlay = debug.copy()
-        cv2.rectangle(overlay, (0, roi_y0),      (x0_roi, h), (0, 0, 0), -1)
-        cv2.rectangle(overlay, (x1_roi, roi_y0), (w, h),      (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, debug, 0.5, 0, debug)
+        # Sombrear zona fuera de la ROI
+        ov = debug.copy()
+        cv2.rectangle(ov, (0, 0), (w, roi_y0), (20, 20, 20), -1)
+        cv2.addWeighted(ov, 0.45, debug, 0.55, 0, debug)
 
-        # Bordes de la zona activa
-        cv2.line(debug, (x0_roi, roi_y0), (x1_roi, roi_y0), (0, 255, 255), 1)
-        cv2.line(debug, (x0_roi, roi_y0), (x0_roi, h),      (0, 255, 255), 1)
-        cv2.line(debug, (x1_roi, roi_y0), (x1_roi, h),      (0, 255, 255), 1)
+        # Proyectar máscara binaria en verde sobre la ROI
+        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        mask_bgr[:, :, 0] = 0   # quitar canal R y B → solo verde
+        mask_bgr[:, :, 2] = 0
+        debug[roi_y0:h, :] = cv2.addWeighted(
+            debug[roi_y0:h, :], 0.6, mask_bgr, 0.4, 0
+        )
 
-        # Dibujar celdas
-        for i in range(self.n_cols):
-            cx0  = x0_roi + int(i * col_w)
-            cx1  = x0_roi + int((i + 1) * col_w)
-            dens = densities[i]
+        # Contorno detectado
+        if best_cnt is not None and found:
+            best_cnt_shifted = best_cnt.copy()
+            best_cnt_shifted[:, :, 1] += roi_y0
+            cv2.drawContours(debug, [best_cnt_shifted], -1, (0, 255, 255), 2)
 
-            if dens > MIN_CELL_FILL:
-                intensity    = int(clamp(dens * 3.0, 0.0, 1.0) * 255)
-                cell_overlay = debug.copy()
-                cv2.rectangle(cell_overlay, (cx0, roi_y0), (cx1, h),
-                              (0, intensity, 0), -1)
-                cv2.addWeighted(cell_overlay, 0.4, debug, 0.6, 0, debug)
+        # Líneas de referencia
+        cv2.line(debug, (0, roi_y0), (w, roi_y0), (180, 180, 0), 1)
+        cv2.line(debug, (w // 2, roi_y0), (w // 2, h), (255, 80, 0), 1)   # centro
 
-            cv2.rectangle(debug, (cx0, roi_y0), (cx1, h), (80, 80, 80), 1)
-            cv2.putText(debug, f'{dens:.2f}', (cx0 + 3, roi_y0 + 14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.32,
-                        (255, 255, 0) if dens > MIN_CELL_FILL else (80, 80, 80), 1)
-
-        # Centroide
-        cx_frame  = x0_roi + int(weighted_cx)
-        cx_center = (x0_roi + x1_roi) // 2
-
+        # Centroide detectado
         if found:
-            cv2.line(debug, (cx_frame, roi_y0), (cx_frame, h), (0, 0, 255), 2)
+            cy_abs = roi_y0 + (h - roi_y0) // 2
+            cv2.circle(debug, (cx_line, cy_abs), 8, (0, 0, 255), -1)
+            cv2.line(debug, (cx_line, roi_y0), (cx_line, h), (0, 0, 255), 2)
 
-        # Centro de la zona activa
-        cv2.line(debug, (cx_center, roi_y0), (cx_center, h), (255, 0, 0), 1)
+        # Flecha de error
+        arr_y = roi_y0 + (h - roi_y0) // 2
+        cv2.arrowedLine(
+            debug, (w // 2, arr_y), (cx_line, arr_y),
+            (0, 255, 0) if found else (60, 60, 60), 2, tipLength=0.25,
+        )
 
-        # Flecha del error
-        arrow_y = roi_y0 + roi_h // 2
-        cv2.arrowedLine(debug, (cx_center, arrow_y), (cx_frame, arrow_y),
-                        (0, 255, 255) if found else (0, 0, 100), 2, tipLength=0.3)
+        # Texto
+        txt   = f'err={error_norm:+.3f}' if found else 'SIN LINEA'
+        color = (0, 255, 120) if found else (0, 60, 255)
+        cv2.putText(debug, txt, (8, roi_y0 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # Texto de estado
-        state_txt = f'err={error_norm:+.3f}' if found else 'NO LINE'
-        state_col = (0, 255, 100) if found else (0, 50, 255)
-        cv2.putText(debug, state_txt, (x0_roi + 4, roi_y0 - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, state_col, 2)
-
-        return error_norm, found, debug, densities
+        return error_norm, found, debug
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,14 +183,15 @@ class LineFollowerCV(Node):
         qos_be = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
         )
 
-        self._detector = GridLineDetector()
+        self._detector = ContourLineDetector()
         self._bridge   = CvBridge()
 
-        # Estado PD
+        # Estado PID
         self._prev_error  = 0.0
+        self._integral    = 0.0
         self._prev_time   = None
         self._last_error  = 0.0
         self._frames_lost = 0
@@ -218,46 +199,37 @@ class LineFollowerCV(Node):
         # Semáforo
         self._semaforo = 'ninguno'
 
-        # Odometría
-        self._current_yaw = 0.0
-        self._odom_ready  = False
-
-        # Publishers
         self._pub_cmd = self.create_publisher(Twist,   '/cmd_vel',          qos_be)
         self._pub_dbg = self.create_publisher(Image,   '/vision/debug_img', 10)
         self._pub_err = self.create_publisher(Float32, '/vision/error',     10)
 
-        # Subscribers
-        self.create_subscription(Image,    '/image/raw',       self._image_cb,    qos_be)
-        self.create_subscription(Odometry, '/odom',            self._odom_cb,     qos_be)
-        self.create_subscription(String,   '/semaforo/estado', self._semaforo_cb, 10)
+        self.create_subscription(Image,  '/image/raw',       self._image_cb,    qos_be)
+        self.create_subscription(String, '/semaforo/estado', self._semaforo_cb, 10)
 
         self.get_logger().info(
-            f'LineFollowerCV listo\n'
-            f'  KP={KP_VIS}  KD={KD_VIS}  v={LINEAR_VEL} m/s\n'
-            f'  ROI inferior={int(ROI_FRACTION*100)}% | '
-            f'zona activa={int((ROI_RIGHT-ROI_LEFT)*100)}% central | '
-            f'{N_COLS} columnas'
+            f'LineFollowerCV listo | '
+            f'KP={KP} KI={KI} KD={KD} | v={LINEAR_VEL} m/s'
         )
 
-    def _odom_cb(self, msg: Odometry):
-        self._current_yaw = yaw_from_quaternion(msg.pose.pose.orientation)
-        self._odom_ready  = True
+    # ── Callbacks ─────────────────────────────────────────────────────────
 
     def _semaforo_cb(self, msg: String):
         nuevo = msg.data
         if nuevo != self._semaforo:
             self.get_logger().info(f'Semáforo: {self._semaforo} → {nuevo}')
+            if nuevo != 'rojo':
+                # Al salir de rojo, reiniciar integral para evitar windup acumulado
+                self._integral = 0.0
         self._semaforo = nuevo
 
     def _image_cb(self, msg: Image):
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
-            self.get_logger().warn(f'cv_bridge error: {e}')
+            self.get_logger().warn(f'cv_bridge: {e}')
             return
 
-        error_norm, found, debug_frame, densities = self._detector.process(frame)
+        error_norm, found, debug_frame = self._detector.process(frame)
 
         dbg_msg        = self._bridge.cv2_to_imgmsg(debug_frame, encoding='bgr8')
         dbg_msg.header = msg.header
@@ -267,50 +239,62 @@ class LineFollowerCV(Node):
         err_msg.data = float(error_norm)
         self._pub_err.publish(err_msg)
 
-        self._run_pd(error_norm, found)
+        self._control(error_norm, found)
 
-    def _run_pd(self, error_norm: float, found: bool):
-        # Semáforo rojo → detener
+    # ── Controlador PID ───────────────────────────────────────────────────
+
+    def _control(self, error: float, found: bool):
+        # Semáforo rojo → parado; la integral no acumula
         if self._semaforo == 'rojo':
             self._pub_cmd.publish(Twist())
+            self._prev_time = None
             return
 
         vel_factor = 0.5 if self._semaforo == 'amarillo' else 1.0
 
         now = self.get_clock().now().nanoseconds * 1e-9
-        dt  = (now - self._prev_time) if self._prev_time is not None else 0.02
+        dt  = (now - self._prev_time) if self._prev_time is not None else 0.033
         dt  = max(dt, 1e-4)
+        self._prev_time = now
 
         cmd = Twist()
 
         if found:
             self._frames_lost = 0
-            self._last_error  = error_norm
 
-            d_error = (error_norm - self._prev_error) / dt
-            u       = KP_VIS * error_norm + KD_VIS * d_error
-            u       = clamp(u, -MAX_ANGULAR, MAX_ANGULAR)
+            # Integral con anti-windup
+            self._integral += error * dt
+            self._integral  = max(-MAX_INTEGRAL,
+                                  min(MAX_INTEGRAL, self._integral))
+
+            derivative = (error - self._prev_error) / dt
+            u = KP * error + KI * self._integral + KD * derivative
+            u = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
+
+            self._prev_error = error
+            self._last_error = error
 
             cmd.linear.x  = LINEAR_VEL * vel_factor
             cmd.angular.z = u
 
         else:
             self._frames_lost += 1
+            self._integral     = 0.0   # reiniciar integral si se pierde la línea
 
             if self._frames_lost < RECOVERY_FRAMES:
-                u             = KP_VIS * self._last_error * 0.5
-                cmd.linear.x  = LINEAR_VEL * vel_factor * 0.5
-                cmd.angular.z = clamp(u, -MAX_ANGULAR, MAX_ANGULAR)
+                # Mantener última corrección suavizada
+                u             = KP * self._last_error * 0.4
+                cmd.linear.x  = LINEAR_VEL * vel_factor * 0.4
+                cmd.angular.z = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
             else:
+                # Girar en el sitio hacia la última dirección conocida
                 self.get_logger().warn(
-                    f'Línea perdida {self._frames_lost} frames — buscando'
+                    f'Línea perdida ({self._frames_lost} frames) — buscando'
                 )
                 cmd.linear.x  = 0.0
-                sign          = 1.0 if self._last_error >= 0 else -1.0
-                cmd.angular.z = sign * RECOVERY_OMEGA
-
-        self._prev_error = error_norm if found else self._prev_error
-        self._prev_time  = now
+                cmd.angular.z = (RECOVERY_OMEGA
+                                 if self._last_error >= 0
+                                 else -RECOVERY_OMEGA)
 
         self._pub_cmd.publish(cmd)
 

@@ -13,9 +13,9 @@ setup(
             'odometry    = straight_line.odometry:main',
             'pd_controller = straight_line.pd_controller:main',
             'line_follower_cv = straight_line.line_follower_cv:main',
-            'camera_node      = straight_line.camera_node:main',  
+            'camera_node      = straight_line.camera_node:main',
             'semaforo         = straight_line.semaforo:main',
-            'ir_recto         = straight_line.ir_recto:main',
+            'web_viz          = straight_line.web_viz:main',
         ],
     },
 )
