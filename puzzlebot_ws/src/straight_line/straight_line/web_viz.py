@@ -20,7 +20,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, qos_profile_sensor_data
 
 PORT = 8080
 
@@ -158,11 +158,24 @@ class WebVizNode(Node):
     def __init__(self):
         super().__init__('web_viz')
 
+        # /image/raw se publica con BEST_EFFORT
         qos_be = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
         )
+        # /vision/debug_img y /semaforo/debug_img se publican con RELIABLE (depth=10)
+        qos_rel = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+
+        QOS_MAP = {
+            'raw':      qos_be,
+            'linea':    qos_rel,
+            'semaforo': qos_rel,
+        }
 
         self._bridge  = CvBridge()
         self._buffers = {key: FrameBuffer() for key in STREAMS}
@@ -172,7 +185,7 @@ class WebVizNode(Node):
             self.create_subscription(
                 Image, topic,
                 lambda msg, b=buf: self._cb(msg, b),
-                qos_be,
+                QOS_MAP[key],
             )
 
         self.get_logger().info(
