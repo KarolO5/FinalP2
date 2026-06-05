@@ -20,7 +20,7 @@ echo "=== Iniciando semaforo ==="
 ros2 run straight_line semaforo &
 sleep 1
 
-echo "=== Iniciando web_viz  →  http://${ROBOT_IP}:8080 ==="
+echo "=== Iniciando web_viz  http://${ROBOT_IP}:8080 ==="
 ros2 run straight_line web_viz &
 sleep 1
 
