@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 # =============================================================================
-# line_follower_cv.py  —  Seguidor de línea por contorno + PID
+# line_follower_cv.py  --  Seguidor de linea por contorno + PID
 # =============================================================================
 #
-# ESTRATEGIA DE DETECCIÓN
-# ───────────────────────
-# 1. Se recorta una ROI del porcentaje inferior del frame.
-# 2. Se convierte a escala de grises y se aplica umbral adaptativo gaussiano
-#    (se adapta a cambios de iluminación en el piso).
-# 3. Se aplica cierre morfológico para rellenar huecos en la línea.
-# 4. Se buscan contornos externos y se selecciona el de mayor área.
-# 5. Se calcula el centroide del contorno con momentos de imagen.
-# 6. El error es la distancia normalizada del centroide al centro horizontal.
-# 7. Un controlador PID convierte ese error en velocidad angular.
+# ESTRATEGIA DE DETECCION
+# -----------------------
+# 1. ROI del porcentaje inferior del frame.
+# 2. Umbral adaptativo gaussiano (se adapta a cambios de iluminacion).
+# 3. Cierre morfologico para rellenar huecos en la linea.
+# 4. Contorno de mayor area = la linea.
+# 5. Centroide con momentos de imagen.
+# 6. Error normalizado -> controlador PID.
 #
-# TÓPICOS
-# ────────
+# TOPICOS
+# -------
 #   Sub : /image/raw         [sensor_msgs/Image]
 #   Sub : /semaforo/estado   [std_msgs/String]
 #   Pub : /cmd_vel           [geometry_msgs/Twist]
@@ -34,51 +32,41 @@ from std_msgs.msg      import Float32, String
 from cv_bridge         import CvBridge
 from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PARÁMETROS  —  ajusta sin tocar la lógica
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
+# PARAMETROS
+# -----------------------------------------------------------------------
 
-# Velocidad base (m/s)
 LINEAR_VEL  = 0.15
 MAX_ANGULAR = 0.60
 
-# PID visual (error normalizado [-1, 1])
 KP = 1.6
-KI = 0.04   # integral pequeña para compensar deriva en curvas largas
+KI = 0.04
 KD = 0.30
-MAX_INTEGRAL = 0.40   # anti-windup
+MAX_INTEGRAL = 0.40
 
-# ROI: fracción inferior del frame que se analiza
-ROI_TOP_FRAC = 0.55   # el ROI empieza en el 55 % del alto (toma el 45 % inferior)
+# Fraccion superior del frame que se ignora (el ROI empieza aqui)
+ROI_TOP_FRAC = 0.55
 
 # Umbral adaptativo
-ADAPT_BLOCK = 31     # tamaño de bloque (impar, > 1)
-ADAPT_C     = 8      # constante sustraída a la media local
+ADAPT_BLOCK = 31
+ADAPT_C     = 8
 
-# Morfología: cierre para unir trazos rotos de la línea
+# Morfologia
 MORPH_KSIZE = (9, 9)
 
-# Área mínima de contorno para considerarlo línea válida (px²)
-MIN_CONTOUR_AREA = 400
+# Area minima del contorno para considerarlo linea valida (px^2)
+MIN_CONTOUR_AREA = 80
 
-# Recovery si la línea se pierde
+# Recovery
 RECOVERY_FRAMES = 25
-RECOVERY_OMEGA  = 0.20   # rad/s girando hacia la última dirección conocida
+RECOVERY_OMEGA  = 0.20
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # DETECTOR
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 
 class ContourLineDetector:
-    """
-    Detecta la línea negra mediante contorno + momentos.
-
-    Devuelve:
-        error_norm  : float [-1, 1]  (0 = centrada, + = línea a izquierda)
-        found       : bool
-        debug       : imagen BGR anotada
-    """
 
     def __init__(self):
         self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
@@ -86,31 +74,31 @@ class ContourLineDetector:
     def process(self, frame: np.ndarray):
         h, w = frame.shape[:2]
 
-        # ── 1. ROI inferior ───────────────────────────────────────────
+        # 1. ROI inferior
         roi_y0 = int(h * ROI_TOP_FRAC)
         roi    = frame[roi_y0:h, :]
 
-        # ── 2. Umbral adaptativo sobre escala de grises ───────────────
+        # 2. Umbral adaptativo
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         mask = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,   # línea oscura → blanco
+            cv2.THRESH_BINARY_INV,
             ADAPT_BLOCK, ADAPT_C,
         )
 
-        # ── 3. Cierre morfológico para rellenar huecos ────────────────
+        # 3. Cierre morfologico
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
 
-        # ── 4. Contorno de mayor área ─────────────────────────────────
+        # 4. Contorno de mayor area
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        found      = False
-        cx_line    = w // 2   # fallback: centro del frame
-        best_cnt   = None
+        found    = False
+        cx_line  = w // 2
+        best_cnt = None
 
         if contours:
             best_cnt = max(contours, key=cv2.contourArea)
@@ -120,60 +108,70 @@ class ContourLineDetector:
                     cx_line = int(M['m10'] / M['m00'])
                     found   = True
 
-        # Error normalizado: 0 = centrado, +1 = línea extremo izquierdo
         error_norm = float((w / 2 - cx_line) / (w / 2))
 
-        # ── 5. Frame de depuración ────────────────────────────────────
-        debug = frame.copy()
+        # 5. Frame de debug
+        debug  = frame.copy()
+        cy_abs = roi_y0 + (h - roi_y0) // 2
 
-        # Sombrear zona fuera de la ROI
+        # Oscurecer zona fuera del ROI
         ov = debug.copy()
-        cv2.rectangle(ov, (0, 0), (w, roi_y0), (20, 20, 20), -1)
-        cv2.addWeighted(ov, 0.45, debug, 0.55, 0, debug)
+        cv2.rectangle(ov, (0, 0), (w, roi_y0), (0, 0, 0), -1)
+        cv2.addWeighted(ov, 0.65, debug, 0.35, 0, debug)
 
-        # Proyectar máscara binaria en verde sobre la ROI
-        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        mask_bgr[:, :, 0] = 0   # quitar canal R y B → solo verde
-        mask_bgr[:, :, 2] = 0
+        # Overlay verde brillante de la mascara binaria
+        mask_color = np.zeros((h - roi_y0, w, 3), dtype=np.uint8)
+        mask_color[mask > 0] = (0, 255, 0)
         debug[roi_y0:h, :] = cv2.addWeighted(
-            debug[roi_y0:h, :], 0.6, mask_bgr, 0.4, 0
+            debug[roi_y0:h, :], 0.45, mask_color, 0.55, 0
         )
 
-        # Contorno detectado
+        # Contorno detectado en cian
         if best_cnt is not None and found:
-            best_cnt_shifted = best_cnt.copy()
-            best_cnt_shifted[:, :, 1] += roi_y0
-            cv2.drawContours(debug, [best_cnt_shifted], -1, (0, 255, 255), 2)
+            shifted = best_cnt.copy()
+            shifted[:, :, 1] += roi_y0
+            cv2.drawContours(debug, [shifted], -1, (0, 255, 255), 3)
 
-        # Líneas de referencia
-        cv2.line(debug, (0, roi_y0), (w, roi_y0), (180, 180, 0), 1)
-        cv2.line(debug, (w // 2, roi_y0), (w // 2, h), (255, 80, 0), 1)   # centro
+        # Borde del ROI (amarillo grueso -- siempre visible)
+        cv2.line(debug, (0, roi_y0), (w, roi_y0), (0, 220, 220), 3)
 
-        # Centroide detectado
+        # Centro horizontal (azul -- siempre visible)
+        cv2.line(debug, (w // 2, roi_y0), (w // 2, h), (255, 100, 0), 2)
+
+        # Centroide (rojo)
         if found:
-            cy_abs = roi_y0 + (h - roi_y0) // 2
-            cv2.circle(debug, (cx_line, cy_abs), 8, (0, 0, 255), -1)
             cv2.line(debug, (cx_line, roi_y0), (cx_line, h), (0, 0, 255), 2)
+            cv2.circle(debug, (cx_line, cy_abs), 12, (0, 0, 255), -1)
+            cv2.circle(debug, (cx_line, cy_abs), 12, (255, 255, 255), 2)
 
         # Flecha de error
-        arr_y = roi_y0 + (h - roi_y0) // 2
-        cv2.arrowedLine(
-            debug, (w // 2, arr_y), (cx_line, arr_y),
-            (0, 255, 0) if found else (60, 60, 60), 2, tipLength=0.25,
-        )
+        arr_color = (0, 255, 0) if found else (80, 80, 80)
+        cv2.arrowedLine(debug, (w // 2, cy_abs), (cx_line, cy_abs),
+                        arr_color, 3, tipLength=0.2)
 
-        # Texto
-        txt   = f'err={error_norm:+.3f}' if found else 'SIN LINEA'
+        # Texto con borde negro para legibilidad
+        txt   = 'err={:+.3f}'.format(error_norm) if found else 'SIN LINEA'
         color = (0, 255, 120) if found else (0, 60, 255)
         cv2.putText(debug, txt, (8, roi_y0 - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 5)
+        cv2.putText(debug, txt, (8, roi_y0 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        # Mini-preview de la mascara en esquina inferior derecha
+        thumb_h = (h - roi_y0) // 3
+        thumb_w = w // 3
+        thumb   = cv2.resize(mask, (thumb_w, thumb_h))
+        debug[h - thumb_h:h, w - thumb_w:w] = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
+        cv2.rectangle(debug, (w - thumb_w, h - thumb_h), (w, h), (150, 150, 150), 1)
+        cv2.putText(debug, 'MASK', (w - thumb_w + 4, h - thumb_h + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
         return error_norm, found, debug
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # NODO ROS 2
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 
 class LineFollowerCV(Node):
 
@@ -189,14 +187,12 @@ class LineFollowerCV(Node):
         self._detector = ContourLineDetector()
         self._bridge   = CvBridge()
 
-        # Estado PID
         self._prev_error  = 0.0
         self._integral    = 0.0
         self._prev_time   = None
         self._last_error  = 0.0
         self._frames_lost = 0
 
-        # Semáforo
         self._semaforo = 'ninguno'
 
         self._pub_cmd = self.create_publisher(Twist,   '/cmd_vel',          qos_be)
@@ -207,18 +203,15 @@ class LineFollowerCV(Node):
         self.create_subscription(String, '/semaforo/estado', self._semaforo_cb, 10)
 
         self.get_logger().info(
-            f'LineFollowerCV listo | '
-            f'KP={KP} KI={KI} KD={KD} | v={LINEAR_VEL} m/s'
+            'LineFollowerCV listo | KP={} KI={} KD={} | v={} m/s'.format(
+                KP, KI, KD, LINEAR_VEL)
         )
-
-    # ── Callbacks ─────────────────────────────────────────────────────────
 
     def _semaforo_cb(self, msg: String):
         nuevo = msg.data
         if nuevo != self._semaforo:
-            self.get_logger().info(f'Semáforo: {self._semaforo} → {nuevo}')
+            self.get_logger().info('Semaforo: {} -> {}'.format(self._semaforo, nuevo))
             if nuevo != 'rojo':
-                # Al salir de rojo, reiniciar integral para evitar windup acumulado
                 self._integral = 0.0
         self._semaforo = nuevo
 
@@ -226,7 +219,7 @@ class LineFollowerCV(Node):
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
-            self.get_logger().warn(f'cv_bridge: {e}')
+            self.get_logger().warn('cv_bridge: {}'.format(e))
             return
 
         error_norm, found, debug_frame = self._detector.process(frame)
@@ -241,10 +234,7 @@ class LineFollowerCV(Node):
 
         self._control(error_norm, found)
 
-    # ── Controlador PID ───────────────────────────────────────────────────
-
     def _control(self, error: float, found: bool):
-        # Semáforo rojo → parado; la integral no acumula
         if self._semaforo == 'rojo':
             self._pub_cmd.publish(Twist())
             self._prev_time = None
@@ -261,15 +251,12 @@ class LineFollowerCV(Node):
 
         if found:
             self._frames_lost = 0
+            self._integral   += error * dt
+            self._integral    = max(-MAX_INTEGRAL, min(MAX_INTEGRAL, self._integral))
 
-            # Integral con anti-windup
-            self._integral += error * dt
-            self._integral  = max(-MAX_INTEGRAL,
-                                  min(MAX_INTEGRAL, self._integral))
-
-            derivative = (error - self._prev_error) / dt
-            u = KP * error + KI * self._integral + KD * derivative
-            u = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
+            derivative        = (error - self._prev_error) / dt
+            u                 = KP * error + KI * self._integral + KD * derivative
+            u                 = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
 
             self._prev_error = error
             self._last_error = error
@@ -279,17 +266,15 @@ class LineFollowerCV(Node):
 
         else:
             self._frames_lost += 1
-            self._integral     = 0.0   # reiniciar integral si se pierde la línea
+            self._integral     = 0.0
 
             if self._frames_lost < RECOVERY_FRAMES:
-                # Mantener última corrección suavizada
                 u             = KP * self._last_error * 0.4
                 cmd.linear.x  = LINEAR_VEL * vel_factor * 0.4
                 cmd.angular.z = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
             else:
-                # Girar en el sitio hacia la última dirección conocida
                 self.get_logger().warn(
-                    f'Línea perdida ({self._frames_lost} frames) — buscando'
+                    'Linea perdida ({} frames) -- buscando'.format(self._frames_lost)
                 )
                 cmd.linear.x  = 0.0
                 cmd.angular.z = (RECOVERY_OMEGA
@@ -302,9 +287,9 @@ class LineFollowerCV(Node):
         self._pub_cmd.publish(Twist())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # MAIN
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 
 def main(args=None):
     rclpy.init(args=args)
