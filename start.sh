@@ -22,6 +22,10 @@ echo "=== Iniciando semaforo ==="
 ros2 run straight_line semaforo &
 sleep 1
 
+echo "=== Iniciando sign_detector ==="
+ros2 run straight_line sign_detector &
+sleep 1
+
 echo "=== Iniciando web_viz  http://${ROBOT_IP}:8080 ==="
 ros2 run straight_line web_viz &
 sleep 1
@@ -29,4 +33,4 @@ sleep 1
 echo "=== Iniciando seguidor de linea ==="
 ros2 run straight_line line_follower_cv
 
-kill %1 %2 %3 %4 %5
+kill %1 %2 %3 %4 %5 %6
