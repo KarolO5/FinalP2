@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 # =============================================================================
-# line_follower_cv.py  --  Seguidor de linea por contorno + PID
+# line_follower_cv.py  --  Seguidor de linea con lookahead
 # =============================================================================
 #
-# ROI activa: franja inferior + zona central del ancho
+# Con la camara mas alta el robot ve mas adelante. Se usan DOS bandas:
 #
-#  +---------+-------------------+---------+
-#  |         |   zona ignorada   |         |  <- parte superior (ROI_TOP_FRAC)
-#  +---------+-------------------+---------+
-#  | ignor.  |   ZONA ACTIVA     | ignor.  |
-#  | 30% izq |   40% central     | 30% der |
-#  +---------+-------------------+---------+
+#  +----------------------------------------+
+#  |           zona ignorada                |  <- ROI_TOP_FRAC
+#  +--------+------------------+------------+
+#  | ignor  |  BANDA FAR       | ignor      |  <- lookahead (ve la curva antes)
+#  | 30%    |  (ROI_FAR_FRAC)  | 30%        |
+#  +--------+------------------+------------+
+#  | ignor  |  BANDA NEAR      | ignor      |  <- control principal (linea cercana)
+#  | 30%    |  (resto)         | 30%        |
+#  +--------+------------------+------------+
 #
-# Seleccion de contorno:
-#   Se elige el contorno cuyo centroide esta mas cerca del centro-inferior
-#   del ROI (el punto del suelo mas proximo al robot), NO el de mayor area.
-#   Esto evita que en curvas el robot salte a la linea exterior.
+# Error combinado:
+#   error = NEAR_W * error_near + FAR_W * error_far
+#
+# La banda FAR anticipa la curva y "pre-gira" antes de llegar.
+# La banda NEAR corrige la posicion actual.
 #
 # TOPICOS
 # -------
@@ -38,23 +42,31 @@ from cv_bridge         import CvBridge
 from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 # -----------------------------------------------------------------------
-# PARAMETROS  -- ajusta estos sin tocar la logica
+# PARAMETROS
 # -----------------------------------------------------------------------
 
-LINEAR_VEL  = 0.13       # m/s, constante
-MAX_ANGULAR = 0.60       # rad/s maximo
+LINEAR_VEL  = 0.13
+MAX_ANGULAR = 0.60
 
 KP = 1.4
 KI = 0.03
 KD = 0.15
 MAX_INTEGRAL = 0.35
 
-# ROI vertical: ignorar el porcentaje superior del frame
-ROI_TOP_FRAC = 0.72      # sube para mirar solo lo mas cercano al robot
+# ROI vertical: ignorar parte superior del frame
+ROI_TOP_FRAC = 0.45    # con camara mas alta, la linea ocupa mas frame
 
-# ROI horizontal: zona activa central (ignorar lados)
+# ROI horizontal: zona activa central
 ROI_LEFT_FRAC  = 0.30
 ROI_RIGHT_FRAC = 0.70
+
+# Lookahead: la banda FAR ocupa los primeros FAR_FRAC del ROI activo
+# La banda NEAR ocupa el resto (la parte inferior)
+FAR_FRAC = 0.45    # fraccion DENTRO del ROI que es "lejos"
+
+# Pesos del error combinado (deben sumar 1.0)
+NEAR_W = 0.65      # peso del error cercano (control principal)
+FAR_W  = 0.35      # peso del error lejano  (lookahead / anticipacion)
 
 # Umbral adaptativo
 ADAPT_BLOCK = 25
@@ -80,17 +92,26 @@ class ContourLineDetector:
     def __init__(self):
         self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
 
-    def _best_contour(self, contours, roi_w, roi_h):
-        """
-        Elige el contorno cuyo centroide esta mas cerca del centro-inferior
-        del ROI. Eso equivale al punto del suelo mas proximo al robot,
-        que es la linea que ya esta siguiendo.
-        """
-        ref_x = roi_w / 2.0
-        ref_y = float(roi_h)
+    def _threshold(self, roi):
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        mask = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            ADAPT_BLOCK, ADAPT_C,
+        )
+        return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
 
+    def _closest_centroid(self, mask, roi_w, roi_h):
+        """Contorno mas cercano al centro-inferior (la linea que pisa el robot)."""
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
         best   = None
         best_d = float('inf')
+        ref_x  = roi_w / 2.0
+        ref_y  = float(roi_h)
 
         for cnt in contours:
             if cv2.contourArea(cnt) < MIN_CONTOUR_AREA:
@@ -103,112 +124,146 @@ class ContourLineDetector:
             d  = ((cx - ref_x) ** 2 + (cy - ref_y) ** 2) ** 0.5
             if d < best_d:
                 best_d = d
-                best   = cnt
+                best   = (cnt, int(cx), int(cy))
 
-        return best
+        return best   # (contour, cx, cy) o None
 
     def process(self, frame: np.ndarray):
         h, w = frame.shape[:2]
 
-        roi_y0 = int(h * ROI_TOP_FRAC)
-        roi_x0 = int(w * ROI_LEFT_FRAC)
-        roi_x1 = int(w * ROI_RIGHT_FRAC)
-        roi_w  = roi_x1 - roi_x0
-        roi_h  = h - roi_y0
+        roi_y0  = int(h * ROI_TOP_FRAC)
+        roi_x0  = int(w * ROI_LEFT_FRAC)
+        roi_x1  = int(w * ROI_RIGHT_FRAC)
+        roi_w   = roi_x1 - roi_x0
+        roi_h   = h - roi_y0
 
-        roi = frame[roi_y0:h, roi_x0:roi_x1]
+        # Separacion entre banda FAR y NEAR
+        split_y = roi_y0 + int(roi_h * FAR_FRAC)
 
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        mask = cv2.adaptiveThreshold(
-            gray, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,
-            ADAPT_BLOCK, ADAPT_C,
-        )
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
+        # ---- Banda FAR (lookahead) ----
+        roi_far  = frame[roi_y0:split_y, roi_x0:roi_x1]
+        mask_far = self._threshold(roi_far) if roi_far.size > 0 else None
 
-        contours, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        found_far = False
+        cx_far    = roi_w // 2
+        cnt_far   = None
 
-        found    = False
-        cx_roi   = roi_w // 2
-        cy_roi   = roi_h // 2
-        best_cnt = None
+        if mask_far is not None:
+            res = self._closest_centroid(mask_far, roi_w, roi_far.shape[0])
+            if res is not None:
+                cnt_far, cx_far, _ = res
+                found_far = True
 
-        if contours:
-            best_cnt = self._best_contour(contours, roi_w, roi_h)
-            if best_cnt is not None:
-                M = cv2.moments(best_cnt)
-                if M['m00'] > 0:
-                    cx_roi = int(M['m10'] / M['m00'])
-                    cy_roi = int(M['m01'] / M['m00'])
-                    found  = True
+        # ---- Banda NEAR (control) ----
+        roi_near  = frame[split_y:h, roi_x0:roi_x1]
+        mask_near = self._threshold(roi_near)
 
-        error_norm    = float((roi_w / 2 - cx_roi) / (roi_w / 2))
-        cx_frame      = roi_x0 + cx_roi
-        cy_frame      = roi_y0 + cy_roi
-        cx_center_abs = (roi_x0 + roi_x1) // 2
+        found_near = False
+        cx_near    = roi_w // 2
+        cnt_near   = None
+
+        if mask_near is not None:
+            res = self._closest_centroid(mask_near, roi_w, roi_near.shape[0])
+            if res is not None:
+                cnt_near, cx_near, _ = res
+                found_near = True
+
+        # ---- Error combinado ----
+        found = found_near or found_far
+
+        err_near = float((roi_w / 2 - cx_near) / (roi_w / 2))
+        err_far  = float((roi_w / 2 - cx_far)  / (roi_w / 2))
+
+        if found_near and found_far:
+            error_norm = NEAR_W * err_near + FAR_W * err_far
+        elif found_near:
+            error_norm = err_near
+        elif found_far:
+            error_norm = err_far * 0.6   # solo lookahead: reaccion suave
+        else:
+            error_norm = 0.0
+
+        error_norm = max(-1.0, min(1.0, error_norm))
 
         # ---------------------------------------------------------------
         # Debug
         # ---------------------------------------------------------------
         debug = frame.copy()
 
-        # Zona superior oscurecida
+        # Oscurecer zona superior ignorada
         ov = debug.copy()
         cv2.rectangle(ov, (0, 0), (w, roi_y0), (0, 0, 0), -1)
         cv2.addWeighted(ov, 0.65, debug, 0.35, 0, debug)
 
-        # Franjas laterales ignoradas (tinte morado)
+        # Oscurecer franjas laterales
         ov2 = debug.copy()
         cv2.rectangle(ov2, (0, roi_y0), (roi_x0, h), (30, 0, 80), -1)
         cv2.rectangle(ov2, (roi_x1, roi_y0), (w, h), (30, 0, 80), -1)
         cv2.addWeighted(ov2, 0.55, debug, 0.45, 0, debug)
 
-        # Mascara binaria en verde sobre zona activa
-        mask_color = np.zeros((roi_h, roi_w, 3), dtype=np.uint8)
-        mask_color[mask > 0] = (0, 255, 0)
-        debug[roi_y0:h, roi_x0:roi_x1] = cv2.addWeighted(
-            debug[roi_y0:h, roi_x0:roi_x1], 0.45, mask_color, 0.55, 0
+        # Overlay verde mascara FAR
+        if mask_far is not None:
+            mc = np.zeros_like(roi_far)
+            mc[mask_far > 0] = (0, 200, 80)
+            debug[roi_y0:split_y, roi_x0:roi_x1] = cv2.addWeighted(
+                debug[roi_y0:split_y, roi_x0:roi_x1], 0.5, mc, 0.5, 0
+            )
+
+        # Overlay verde mascara NEAR
+        mc2 = np.zeros_like(roi_near)
+        mc2[mask_near > 0] = (0, 255, 0)
+        debug[split_y:h, roi_x0:roi_x1] = cv2.addWeighted(
+            debug[split_y:h, roi_x0:roi_x1], 0.45, mc2, 0.55, 0
         )
 
-        # Todos los contornos validos en gris (cuantas lineas ve)
-        for cnt in contours:
-            if cv2.contourArea(cnt) >= MIN_CONTOUR_AREA:
-                s = cnt.copy()
-                s[:, :, 0] += roi_x0
-                s[:, :, 1] += roi_y0
-                cv2.drawContours(debug, [s], -1, (120, 120, 120), 1)
-
-        # Contorno seleccionado en cian
-        if best_cnt is not None and found:
-            s = best_cnt.copy()
+        # Contorno FAR en verde oscuro
+        if cnt_far is not None and found_far:
+            s = cnt_far.copy()
             s[:, :, 0] += roi_x0
             s[:, :, 1] += roi_y0
+            cv2.drawContours(debug, [s], -1, (0, 180, 60), 2)
+
+        # Contorno NEAR en cian
+        if cnt_near is not None and found_near:
+            s = cnt_near.copy()
+            s[:, :, 0] += roi_x0
+            s[:, :, 1] += split_y
             cv2.drawContours(debug, [s], -1, (0, 255, 255), 3)
 
         # Bordes del ROI activo
-        cv2.line(debug, (roi_x0, roi_y0), (roi_x1, roi_y0), (0, 220, 220), 3)
-        cv2.line(debug, (roi_x0, roi_y0), (roi_x0, h),      (0, 220, 220), 2)
-        cv2.line(debug, (roi_x1, roi_y0), (roi_x1, h),      (0, 220, 220), 2)
+        cv2.line(debug, (roi_x0, roi_y0), (roi_x1, roi_y0), (0, 220, 220), 2)   # top
+        cv2.line(debug, (roi_x0, roi_y0), (roi_x0, h),      (0, 220, 220), 2)   # izq
+        cv2.line(debug, (roi_x1, roi_y0), (roi_x1, h),      (0, 220, 220), 2)   # der
+        # Division FAR / NEAR
+        cv2.line(debug, (roi_x0, split_y), (roi_x1, split_y), (255, 200, 0), 1)
 
-        # Linea de centro (referencia error=0)
+        # Etiquetas de banda
+        cv2.putText(debug, 'FAR', (roi_x0 + 4, roi_y0 + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 80), 1)
+        cv2.putText(debug, 'NEAR', (roi_x0 + 4, split_y + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+
+        # Centro de referencia
+        cx_center_abs = (roi_x0 + roi_x1) // 2
         cv2.line(debug, (cx_center_abs, roi_y0), (cx_center_abs, h), (255, 100, 0), 2)
 
-        # Centroide seleccionado
-        if found:
-            cv2.line(debug, (cx_frame, roi_y0), (cx_frame, h), (0, 0, 255), 2)
-            cv2.circle(debug, (cx_frame, cy_frame), 12, (0, 0, 255), -1)
-            cv2.circle(debug, (cx_frame, cy_frame), 12, (255, 255, 255), 2)
+        # Centroides
+        if found_far:
+            cx_far_abs = roi_x0 + cx_far
+            cy_far_abs = roi_y0 + (split_y - roi_y0) // 2
+            cv2.circle(debug, (cx_far_abs, cy_far_abs), 8, (0, 180, 60), -1)
 
-        # Flecha de error
+        if found_near:
+            cx_near_abs = roi_x0 + cx_near
+            cy_near_abs = split_y + (h - split_y) // 2
+            cv2.circle(debug, (cx_near_abs, cy_near_abs), 10, (0, 0, 255), -1)
+            cv2.circle(debug, (cx_near_abs, cy_near_abs), 10, (255, 255, 255), 2)
+
+        # Flecha de error combinado
         arr_y     = h - 20
+        cx_result = cx_center_abs + int(-error_norm * (roi_w / 2))
         arr_color = (0, 255, 0) if found else (80, 80, 80)
-        cv2.arrowedLine(debug,
-                        (cx_center_abs, arr_y),
-                        (cx_frame if found else cx_center_abs, arr_y),
+        cv2.arrowedLine(debug, (cx_center_abs, arr_y), (cx_result, arr_y),
                         arr_color, 3, tipLength=0.2)
 
         # Texto
@@ -219,16 +274,18 @@ class ContourLineDetector:
         cv2.putText(debug, txt, (roi_x0, roi_y0 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-        # Mini-preview mascara
-        thumb_h = roi_h // 3
-        thumb_w = roi_w // 3
-        thumb   = cv2.resize(mask, (thumb_w, thumb_h))
-        x0t = w - thumb_w - 4
-        y0t = h - thumb_h - 4
-        debug[y0t:y0t + thumb_h, x0t:x0t + thumb_w] = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
-        cv2.rectangle(debug, (x0t, y0t), (x0t + thumb_w, y0t + thumb_h), (150, 150, 150), 1)
-        cv2.putText(debug, 'MASK', (x0t + 3, y0t + 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        # Mini-preview NEAR en esquina inferior derecha
+        near_h = h - split_y
+        if near_h > 0:
+            th = near_h // 3
+            tw = roi_w  // 3
+            thumb = cv2.resize(mask_near, (tw, th))
+            x0t = w - tw - 4
+            y0t = h - th - 4
+            debug[y0t:y0t + th, x0t:x0t + tw] = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
+            cv2.rectangle(debug, (x0t, y0t), (x0t + tw, y0t + th), (150, 150, 150), 1)
+            cv2.putText(debug, 'NEAR', (x0t + 2, y0t + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
         return error_norm, found, debug
 
@@ -267,8 +324,8 @@ class LineFollowerCV(Node):
         self.create_subscription(String, '/semaforo/estado', self._semaforo_cb, 10)
 
         self.get_logger().info(
-            'LineFollowerCV listo | KP={} KI={} KD={} | v={} m/s'.format(
-                KP, KI, KD, LINEAR_VEL)
+            'LineFollowerCV listo | KP={} KI={} KD={} | v={} m/s | '
+            'NEAR_W={} FAR_W={}'.format(KP, KI, KD, LINEAR_VEL, NEAR_W, FAR_W)
         )
 
     def _semaforo_cb(self, msg: String):
