@@ -3,14 +3,17 @@
 # line_follower_cv.py  --  Seguidor de linea por contorno + PID
 # =============================================================================
 #
-# ESTRATEGIA DE DETECCION
-# -----------------------
-# 1. ROI del porcentaje inferior del frame.
-# 2. Umbral adaptativo gaussiano (se adapta a cambios de iluminacion).
-# 3. Cierre morfologico para rellenar huecos en la linea.
-# 4. Contorno de mayor area = la linea.
-# 5. Centroide con momentos de imagen.
-# 6. Error normalizado -> controlador PID.
+# ROI activa: franja inferior + zona central del ancho
+#
+#  +---------+-------------------+---------+
+#  |         |   zona ignorada   |         |  <- parte superior (ROI_TOP_FRAC)
+#  +---------+-------------------+---------+
+#  | ignor.  |   ZONA ACTIVA     | ignor.  |  <- 40% inferior
+#  | 30% izq |   40% central     | 30% der |
+#  +---------+-------------------+---------+
+#
+# Esto evita confundir la linea central con las lineas laterales del circuito
+# cuando hay curvas.
 #
 # TOPICOS
 # -------
@@ -44,8 +47,12 @@ KI = 0.04
 KD = 0.30
 MAX_INTEGRAL = 0.40
 
-# Fraccion superior del frame que se ignora (el ROI empieza aqui)
+# ROI vertical: el ROI empieza en este porcentaje del alto (ignora la parte superior)
 ROI_TOP_FRAC = 0.55
+
+# ROI horizontal: zona activa central (ignora los lados)
+ROI_LEFT_FRAC  = 0.30   # ignora el 30% izquierdo
+ROI_RIGHT_FRAC = 0.70   # ignora el 30% derecho (zona activa = 40% central)
 
 # Umbral adaptativo
 ADAPT_BLOCK = 31
@@ -74,11 +81,16 @@ class ContourLineDetector:
     def process(self, frame: np.ndarray):
         h, w = frame.shape[:2]
 
-        # 1. ROI inferior
+        # Coordenadas del ROI activo
         roi_y0 = int(h * ROI_TOP_FRAC)
-        roi    = frame[roi_y0:h, :]
+        roi_x0 = int(w * ROI_LEFT_FRAC)
+        roi_x1 = int(w * ROI_RIGHT_FRAC)
+        roi_w  = roi_x1 - roi_x0
 
-        # 2. Umbral adaptativo
+        # Recortar la zona activa
+        roi = frame[roi_y0:h, roi_x0:roi_x1]
+
+        # Umbral adaptativo
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         mask = cv2.adaptiveThreshold(
@@ -88,16 +100,17 @@ class ContourLineDetector:
             ADAPT_BLOCK, ADAPT_C,
         )
 
-        # 3. Cierre morfologico
+        # Cierre morfologico
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
 
-        # 4. Contorno de mayor area
+        # Contorno de mayor area dentro de la zona activa
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
         found    = False
-        cx_line  = w // 2
+        # cx_line en coordenadas de la zona activa (0..roi_w)
+        cx_roi   = roi_w // 2
         best_cnt = None
 
         if contours:
@@ -105,66 +118,84 @@ class ContourLineDetector:
             if cv2.contourArea(best_cnt) >= MIN_CONTOUR_AREA:
                 M = cv2.moments(best_cnt)
                 if M['m00'] > 0:
-                    cx_line = int(M['m10'] / M['m00'])
-                    found   = True
+                    cx_roi = int(M['m10'] / M['m00'])
+                    found  = True
 
-        error_norm = float((w / 2 - cx_line) / (w / 2))
+        # Error relativo al centro de la zona activa, normalizado [-1, 1]
+        error_norm = float((roi_w / 2 - cx_roi) / (roi_w / 2))
 
-        # 5. Frame de debug
-        debug  = frame.copy()
-        cy_abs = roi_y0 + (h - roi_y0) // 2
+        # cx en coordenadas del frame completo (para dibujar)
+        cx_frame = roi_x0 + cx_roi
+        cx_center_frame = (roi_x0 + roi_x1) // 2
 
-        # Oscurecer zona fuera del ROI
+        # ---------------------------------------------------------------
+        # Frame de debug
+        # ---------------------------------------------------------------
+        debug = frame.copy()
+
+        # 1. Oscurecer zona fuera del ROI vertical (parte superior)
         ov = debug.copy()
         cv2.rectangle(ov, (0, 0), (w, roi_y0), (0, 0, 0), -1)
         cv2.addWeighted(ov, 0.65, debug, 0.35, 0, debug)
 
-        # Overlay verde brillante de la mascara binaria
-        mask_color = np.zeros((h - roi_y0, w, 3), dtype=np.uint8)
+        # 2. Oscurecer franjas laterales ignoradas
+        ov2 = debug.copy()
+        cv2.rectangle(ov2, (0, roi_y0), (roi_x0, h), (0, 0, 60), -1)
+        cv2.rectangle(ov2, (roi_x1, roi_y0), (w, h), (0, 0, 60), -1)
+        cv2.addWeighted(ov2, 0.6, debug, 0.4, 0, debug)
+
+        # 3. Overlay verde de la mascara binaria SOLO en zona activa
+        mask_color = np.zeros((h - roi_y0, roi_w, 3), dtype=np.uint8)
         mask_color[mask > 0] = (0, 255, 0)
-        debug[roi_y0:h, :] = cv2.addWeighted(
-            debug[roi_y0:h, :], 0.45, mask_color, 0.55, 0
+        debug[roi_y0:h, roi_x0:roi_x1] = cv2.addWeighted(
+            debug[roi_y0:h, roi_x0:roi_x1], 0.45, mask_color, 0.55, 0
         )
 
-        # Contorno detectado en cian
+        # 4. Contorno detectado en cian
         if best_cnt is not None and found:
             shifted = best_cnt.copy()
-            shifted[:, :, 1] += roi_y0
+            shifted[:, :, 0] += roi_x0   # desplazar X
+            shifted[:, :, 1] += roi_y0   # desplazar Y
             cv2.drawContours(debug, [shifted], -1, (0, 255, 255), 3)
 
-        # Borde del ROI (amarillo grueso -- siempre visible)
-        cv2.line(debug, (0, roi_y0), (w, roi_y0), (0, 220, 220), 3)
+        # 5. Bordes de la zona activa (cian grueso -- siempre visibles)
+        cv2.line(debug, (roi_x0, roi_y0), (roi_x1, roi_y0), (0, 220, 220), 3)  # top
+        cv2.line(debug, (roi_x0, roi_y0), (roi_x0, h),      (0, 220, 220), 2)  # izq
+        cv2.line(debug, (roi_x1, roi_y0), (roi_x1, h),      (0, 220, 220), 2)  # der
 
-        # Centro horizontal (azul -- siempre visible)
-        cv2.line(debug, (w // 2, roi_y0), (w // 2, h), (255, 100, 0), 2)
+        # 6. Centro de la zona activa (azul -- referencia de error=0)
+        cv2.line(debug, (cx_center_frame, roi_y0), (cx_center_frame, h), (255, 100, 0), 2)
 
-        # Centroide (rojo)
+        # 7. Centroide detectado (rojo)
+        cy_abs = roi_y0 + (h - roi_y0) // 2
         if found:
-            cv2.line(debug, (cx_line, roi_y0), (cx_line, h), (0, 0, 255), 2)
-            cv2.circle(debug, (cx_line, cy_abs), 12, (0, 0, 255), -1)
-            cv2.circle(debug, (cx_line, cy_abs), 12, (255, 255, 255), 2)
+            cv2.line(debug, (cx_frame, roi_y0), (cx_frame, h), (0, 0, 255), 2)
+            cv2.circle(debug, (cx_frame, cy_abs), 12, (0, 0, 255), -1)
+            cv2.circle(debug, (cx_frame, cy_abs), 12, (255, 255, 255), 2)
 
-        # Flecha de error
+        # 8. Flecha de error (centro -> centroide)
         arr_color = (0, 255, 0) if found else (80, 80, 80)
-        cv2.arrowedLine(debug, (w // 2, cy_abs), (cx_line, cy_abs),
+        cv2.arrowedLine(debug, (cx_center_frame, cy_abs), (cx_frame, cy_abs),
                         arr_color, 3, tipLength=0.2)
 
-        # Texto con borde negro para legibilidad
+        # 9. Texto de estado con borde negro
         txt   = 'err={:+.3f}'.format(error_norm) if found else 'SIN LINEA'
         color = (0, 255, 120) if found else (0, 60, 255)
-        cv2.putText(debug, txt, (8, roi_y0 - 8),
+        cv2.putText(debug, txt, (roi_x0, roi_y0 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 5)
-        cv2.putText(debug, txt, (8, roi_y0 - 8),
+        cv2.putText(debug, txt, (roi_x0, roi_y0 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-        # Mini-preview de la mascara en esquina inferior derecha
+        # 10. Mini-preview de la mascara en esquina inferior derecha
         thumb_h = (h - roi_y0) // 3
-        thumb_w = w // 3
+        thumb_w = roi_w // 3
         thumb   = cv2.resize(mask, (thumb_w, thumb_h))
-        debug[h - thumb_h:h, w - thumb_w:w] = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
-        cv2.rectangle(debug, (w - thumb_w, h - thumb_h), (w, h), (150, 150, 150), 1)
-        cv2.putText(debug, 'MASK', (w - thumb_w + 4, h - thumb_h + 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        x0t = w - thumb_w - 4
+        y0t = h - thumb_h - 4
+        debug[y0t:y0t + thumb_h, x0t:x0t + thumb_w] = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
+        cv2.rectangle(debug, (x0t, y0t), (x0t + thumb_w, y0t + thumb_h), (150, 150, 150), 1)
+        cv2.putText(debug, 'MASK', (x0t + 3, y0t + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
         return error_norm, found, debug
 
@@ -203,8 +234,11 @@ class LineFollowerCV(Node):
         self.create_subscription(String, '/semaforo/estado', self._semaforo_cb, 10)
 
         self.get_logger().info(
-            'LineFollowerCV listo | KP={} KI={} KD={} | v={} m/s'.format(
-                KP, KI, KD, LINEAR_VEL)
+            'LineFollowerCV listo | KP={} KI={} KD={} | v={} m/s | '
+            'ROI top={}% | lateral {}%-{}%'.format(
+                KP, KI, KD, LINEAR_VEL,
+                int(ROI_TOP_FRAC * 100),
+                int(ROI_LEFT_FRAC * 100), int(ROI_RIGHT_FRAC * 100))
         )
 
     def _semaforo_cb(self, msg: String):
