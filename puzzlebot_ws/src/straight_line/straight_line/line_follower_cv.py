@@ -65,8 +65,8 @@ ROI_RIGHT_FRAC = 0.70
 FAR_FRAC = 0.45    # fraccion DENTRO del ROI que es "lejos"
 
 # Pesos del error combinado (deben sumar 1.0)
-NEAR_W = 0.65      # peso del error cercano (control principal)
-FAR_W  = 0.35      # peso del error lejano  (lookahead / anticipacion)
+NEAR_W = 0.80      # peso del error cercano (control principal)
+FAR_W  = 0.20      # peso del error lejano  (lookahead / anticipacion)
 
 # Umbral adaptativo
 ADAPT_BLOCK = 25

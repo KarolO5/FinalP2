@@ -138,9 +138,14 @@ class SnapshotWriter:
             self._write(frame)
 
     def _write(self, frame: np.ndarray):
+        # Codificar en memoria para evitar dependencia del codec JPEG del sistema
+        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q])
+        if not ok:
+            return
         tmp = self._path + '.tmp'
-        cv2.imwrite(tmp, frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q])
-        os.replace(tmp, self._path)   # reemplazo atomico, sin archivos corruptos
+        with open(tmp, 'wb') as f:
+            f.write(buf.tobytes())
+        os.replace(tmp, self._path)
 
 
 # -----------------------------------------------------------------------
