@@ -46,7 +46,7 @@ AMARILLO_FACTOR = 0.60
 SLOW_SIGN_FACTOR = 0.55
 
 # ROI: mas flaco horizontalmente para enfocarse en la linea central
-ROI_TOP_FRAC   = 0.60
+ROI_TOP_FRAC   = 0.78
 ROI_LEFT_FRAC  = 0.33    # era 0.28 -> mas estrecho
 ROI_RIGHT_FRAC = 0.67    # era 0.72 -> 34% del ancho total
 
