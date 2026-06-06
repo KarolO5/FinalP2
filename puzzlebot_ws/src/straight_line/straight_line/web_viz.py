@@ -29,6 +29,7 @@ STREAMS = {
     'raw':      '/image/raw',
     'linea':    '/vision/debug_img',
     'semaforo': '/semaforo/debug_img',
+    'senal':    '/sign/debug_img',
 }
 
 # QoS por topic
@@ -36,6 +37,7 @@ QOS_BY_KEY = {
     'raw':      'best_effort',
     'linea':    'reliable',
     'semaforo': 'reliable',
+    'senal':    'reliable',
 }
 
 HTML = b"""<!DOCTYPE html>
@@ -76,6 +78,7 @@ HTML = b"""<!DOCTYPE html>
       <button onclick="setStream('raw')"      id="btn-raw">RAW</button>
       <button onclick="setStream('linea')"    id="btn-linea">L&Iacute;NEA</button>
       <button onclick="setStream('semaforo')" id="btn-semaforo">SEM&Aacute;FORO</button>
+      <button onclick="setStream('senal')"    id="btn-senal">SE&Ntilde;AL</button>
     </div>
     <div class="badge">viendo: <span id="label">raw</span></div>
   </header>
@@ -89,7 +92,7 @@ HTML = b"""<!DOCTYPE html>
       current = name;
       document.getElementById('feed').src = '/stream/' + name;
       document.getElementById('label').textContent = name;
-      ['raw','linea','semaforo'].forEach(function(k){
+      ['raw','linea','semaforo','senal'].forEach(function(k){
         document.getElementById('btn-'+k).classList.toggle('active', k===name);
       });
     }
