@@ -50,7 +50,7 @@ KD = 0.15
 MAX_INTEGRAL = 0.35
 
 # ROI vertical: ignorar el porcentaje superior del frame
-ROI_TOP_FRAC = 0.68      # sube para mirar solo lo mas cercano al robot
+ROI_TOP_FRAC = 0.72      # sube para mirar solo lo mas cercano al robot
 
 # ROI horizontal: zona activa central (ignorar lados)
 ROI_LEFT_FRAC  = 0.30

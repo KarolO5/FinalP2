@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 # =============================================================================
-# semaforo.py
+# semaforo.py  --  Detector de semaforo por color HSV
 # =============================================================================
-# Detecta el color del semáforo (rojo, amarillo, verde) en la esquina
-# superior derecha del frame usando OpenCV (HSV + máscaras de color).
 #
-# ROI — esquina superior derecha:
-#   - Vertical  : 0 .. ROI_H_FRAC  del alto total
-#   - Horizontal: (1 - ROI_W_FRAC) .. 1  del ancho total
+# ROI: esquina superior derecha del frame
 #
-# Lógica de estado:
-#   rojo    → robot se detiene; permanece detenido hasta recibir verde
-#   amarillo → velocidad a la mitad; sale cuando deja de ver amarillo o ve verde
-#   verde   → velocidad normal
-#   ninguno → no cambia el estado anterior (sin semáforo visible)
+#  +-----------------------------+----------+
+#  |                             |          |  <- ROI_H_FRAC (50% superior)
+#  |        ignorado             |  ROI     |
+#  |                             | (28% der)|
+#  +-----------------------------+----------+
+#  |         ignorado                       |
+#  +----------------------------------------+
 #
-# TÓPICOS
-# ────────
+# Logica de estado persistente:
+#   rojo    -> robot para; se queda en rojo hasta ver verde
+#   amarillo -> velocidad a la mitad; sale al dejar de verlo o al ver verde
+#   verde   -> velocidad normal
+#   ninguno -> mantiene estado anterior (parpadeos no cambian el estado)
+#
+# TOPICOS
+# -------
 #   Sub : /image/raw          [sensor_msgs/Image]
-#   Pub : /semaforo/estado    [std_msgs/String]      "rojo"|"amarillo"|"verde"|"ninguno"
-#   Pub : /semaforo/debug_img [sensor_msgs/Image]    frame con ROI anotado y máscaras
+#   Pub : /semaforo/estado    [std_msgs/String]   rojo|amarillo|verde|ninguno
+#   Pub : /semaforo/debug_img [sensor_msgs/Image] frame anotado con mascaras
 # =============================================================================
 
 import cv2
@@ -32,16 +36,16 @@ from std_msgs.msg import String
 from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PARÁMETROS DE ROI  (esquina superior derecha)
-# ─────────────────────────────────────────────────────────────────────────────
-ROI_H_FRAC = 0.35   # fracción del alto desde arriba   (0–35 %)
-ROI_W_FRAC = 0.35   # fracción del ancho desde la derecha (65–100 %)
+# -----------------------------------------------------------------------
+# ROI  (esquina superior derecha, ajustado al rectangulo de la senal)
+# -----------------------------------------------------------------------
+ROI_H_FRAC = 0.50    # fraccion del alto desde arriba  (0 - 50%)
+ROI_W_FRAC = 0.28    # fraccion del ancho desde la derecha (72% - 100%)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # RANGOS HSV
-# ─────────────────────────────────────────────────────────────────────────────
-# Rojo cruza el 0/180 en HSV → dos rangos
+# -----------------------------------------------------------------------
+# Rojo cruza el 0/180 en HSV -> dos rangos
 RED_LO1 = np.array([  0, 120,  80])
 RED_HI1 = np.array([ 10, 255, 255])
 RED_LO2 = np.array([165, 120,  80])
@@ -53,12 +57,13 @@ YELLOW_HI = np.array([ 35, 255, 255])
 GREEN_LO  = np.array([ 40,  80,  60])
 GREEN_HI  = np.array([ 90, 255, 255])
 
-MIN_PIXELS = 200   # píxeles mínimos para detección válida
+# Pixeles minimos para considerar deteccion valida
+MIN_PIXELS = 150
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # NODO
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 
 class SemaforoNode(Node):
 
@@ -72,8 +77,6 @@ class SemaforoNode(Node):
         )
 
         self._bridge = CvBridge()
-
-        # Estado persistente: el semáforo no cambia hasta que hay una señal clara
         self._estado_actual = 'ninguno'
 
         self._pub_estado = self.create_publisher(String, '/semaforo/estado',    10)
@@ -82,17 +85,15 @@ class SemaforoNode(Node):
         self.create_subscription(Image, '/image/raw', self._image_cb, qos_be)
 
         self.get_logger().info(
-            f'SemaforoNode listo | ROI esquina sup-der '
-            f'{int(ROI_H_FRAC*100)}% alto x {int(ROI_W_FRAC*100)}% ancho'
+            'SemaforoNode listo | ROI esquina sup-der {}% alto x {}% ancho'.format(
+                int(ROI_H_FRAC * 100), int(ROI_W_FRAC * 100))
         )
-
-    # ── Callback ──────────────────────────────────────────────────────────
 
     def _image_cb(self, msg: Image):
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
-            self.get_logger().warn(f'cv_bridge error: {e}')
+            self.get_logger().warn('cv_bridge: {}'.format(e))
             return
 
         estado, debug_frame = self._detect(frame)
@@ -105,12 +106,10 @@ class SemaforoNode(Node):
         dbg_msg.header = msg.header
         self._pub_debug.publish(dbg_msg)
 
-    # ── Detección ─────────────────────────────────────────────────────────
-
     def _detect(self, frame: np.ndarray):
         h, w = frame.shape[:2]
 
-        # Coordenadas ROI esquina superior derecha
+        # Coordenadas del ROI
         roi_y0 = 0
         roi_y1 = int(h * ROI_H_FRAC)
         roi_x0 = int(w * (1.0 - ROI_W_FRAC))
@@ -129,84 +128,106 @@ class SemaforoNode(Node):
         px_yellow = int(cv2.countNonZero(mask_yellow))
         px_green  = int(cv2.countNonZero(mask_green))
 
-        # Determinar color dominante (prioridad: rojo > amarillo > verde)
-        color_detectado = 'ninguno'
+        # Color dominante
+        color_det = 'ninguno'
         if px_red >= MIN_PIXELS and px_red >= px_yellow and px_red >= px_green:
-            color_detectado = 'rojo'
+            color_det = 'rojo'
         elif px_yellow >= MIN_PIXELS and px_yellow >= px_green:
-            color_detectado = 'amarillo'
+            color_det = 'amarillo'
         elif px_green >= MIN_PIXELS:
-            color_detectado = 'verde'
+            color_det = 'verde'
 
-        # Lógica de transición de estado persistente:
-        #   rojo   → se queda en rojo hasta que aparezca verde
-        #   amarillo → se queda en amarillo hasta que desaparezca o aparezca verde
-        #   verde / ninguno → transición directa
-        estado_anterior = self._estado_actual
+        # Transicion de estado persistente
+        anterior = self._estado_actual
 
-        if color_detectado == 'verde':
+        if color_det == 'verde':
             self._estado_actual = 'verde'
-        elif color_detectado == 'rojo':
+        elif color_det == 'rojo':
             self._estado_actual = 'rojo'
-        elif color_detectado == 'amarillo':
-            # Solo entra en amarillo si no estaba en rojo
-            if estado_anterior != 'rojo':
+        elif color_det == 'amarillo':
+            if anterior != 'rojo':
                 self._estado_actual = 'amarillo'
         else:
-            # Ningún color detectado
-            if estado_anterior == 'amarillo':
-                # Salir de amarillo cuando deja de verse
+            if anterior == 'amarillo':
                 self._estado_actual = 'ninguno'
-            # Si era rojo, permanece rojo hasta que llegue verde
-            # Si era verde/ninguno, permanece igual
+            # rojo se mantiene hasta ver verde
 
-        if self._estado_actual != estado_anterior:
+        if self._estado_actual != anterior:
             self.get_logger().info(
-                f'Semáforo: {estado_anterior} → {self._estado_actual} '
-                f'(R={px_red} A={px_yellow} V={px_green})'
+                'Semaforo: {} -> {}  (R={} A={} V={})'.format(
+                    anterior, self._estado_actual, px_red, px_yellow, px_green)
             )
 
-        # ── Frame de depuración ───────────────────────────────────────
+        # ---------------------------------------------------------------
+        # Debug: frame completo con ROI anotado
+        # ---------------------------------------------------------------
         debug = frame.copy()
 
         COLORS = {
-            'rojo':    (0,   0, 220),
-            'amarillo':(0, 200, 220),
-            'verde':   (0, 200,  60),
-            'ninguno': (120, 120, 120),
+            'rojo':     (0,   0, 220),
+            'amarillo': (0, 200, 220),
+            'verde':    (0, 200,  60),
+            'ninguno':  (120, 120, 120),
         }
         box_color = COLORS[self._estado_actual]
 
-        # Rectángulo ROI
-        cv2.rectangle(debug, (roi_x0, roi_y0), (roi_x1, roi_y1), box_color, 2)
+        # Oscurecer zona fuera del ROI
+        ov = debug.copy()
+        cv2.rectangle(ov, (0, 0), (roi_x0, h), (0, 0, 0), -1)
+        cv2.rectangle(ov, (0, roi_y1), (w, h), (0, 0, 0), -1)
+        cv2.addWeighted(ov, 0.55, debug, 0.45, 0, debug)
 
-        # Overlay de la máscara ganadora sobre el ROI
+        # Overlay de la mascara ganadora dentro del ROI
         mask_map = {
-            'rojo':    mask_red,
-            'amarillo':mask_yellow,
-            'verde':   mask_green,
+            'rojo':     mask_red,
+            'amarillo': mask_yellow,
+            'verde':    mask_green,
         }
-        if color_detectado in mask_map:
+        if color_det in mask_map:
             colored = np.zeros_like(roi)
-            colored[mask_map[color_detectado] > 0] = box_color
+            colored[mask_map[color_det] > 0] = box_color
             blended = cv2.addWeighted(
-                debug[roi_y0:roi_y1, roi_x0:roi_x1], 0.6, colored, 0.4, 0
+                debug[roi_y0:roi_y1, roi_x0:roi_x1], 0.5, colored, 0.5, 0
             )
             debug[roi_y0:roi_y1, roi_x0:roi_x1] = blended
 
-        # Etiqueta
-        label = (f'{self._estado_actual.upper()} '
-                 f'R={px_red} A={px_yellow} V={px_green}')
-        cv2.putText(debug, label,
-                    (roi_x0, roi_y1 + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+        # Borde del ROI (grueso, siempre visible)
+        cv2.rectangle(debug, (roi_x0, roi_y0), (roi_x1 - 1, roi_y1), box_color, 3)
+
+        # Texto de estado
+        label = '{} R={} A={} V={}'.format(
+            self._estado_actual.upper(), px_red, px_yellow, px_green)
+        cv2.putText(debug, label, (roi_x0, roi_y1 + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4)
+        cv2.putText(debug, label, (roi_x0, roi_y1 + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2)
+
+        # Mini-previews de las 3 mascaras (R / A / V) debajo del ROI
+        roi_w  = roi_x1 - roi_x0
+        roi_h_ = roi_y1 - roi_y0
+        th = roi_h_ // 3
+        tw = roi_w  // 3
+        for i, (lbl, msk, col) in enumerate([
+            ('R', mask_red,    (0, 0, 200)),
+            ('A', mask_yellow, (0, 200, 220)),
+            ('V', mask_green,  (0, 200, 60)),
+        ]):
+            t = cv2.resize(msk, (tw, th))
+            t_bgr = cv2.cvtColor(t, cv2.COLOR_GRAY2BGR)
+            x0t = roi_x0 + i * tw
+            y0t = roi_y1 + 30
+            if y0t + th <= h and x0t + tw <= w:
+                debug[y0t:y0t + th, x0t:x0t + tw] = t_bgr
+                cv2.rectangle(debug, (x0t, y0t), (x0t + tw, y0t + th), col, 1)
+                cv2.putText(debug, lbl, (x0t + 3, y0t + 13),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, col, 1)
 
         return self._estado_actual, debug
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # MAIN
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 
 def main(args=None):
     rclpy.init(args=args)
