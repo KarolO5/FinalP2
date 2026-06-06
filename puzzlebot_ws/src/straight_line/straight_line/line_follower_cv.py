@@ -36,7 +36,7 @@ from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 # -----------------------------------------------------------------------
 # PARAMETROS PID
 # -----------------------------------------------------------------------
-LINEAR_VEL  = 0.11
+LINEAR_VEL  = 0.09       # un poquitin mas lento para tener mas tiempo de reaccion
 MAX_ANGULAR = 0.55
 KP = 1.2
 KI = 0.02
@@ -45,16 +45,17 @@ MAX_INTEGRAL    = 0.30
 AMARILLO_FACTOR = 0.60
 SLOW_SIGN_FACTOR = 0.55
 
-# ROI
+# ROI: mas flaco horizontalmente para enfocarse en la linea central
 ROI_TOP_FRAC   = 0.60
-ROI_LEFT_FRAC  = 0.28
-ROI_RIGHT_FRAC = 0.72
+ROI_LEFT_FRAC  = 0.33    # era 0.28 -> mas estrecho
+ROI_RIGHT_FRAC = 0.67    # era 0.72 -> 34% del ancho total
 
 # Vision
 ADAPT_BLOCK = 25
-ADAPT_C     = 6
-MORPH_KSIZE = (7, 7)
-MIN_CONTOUR_AREA = 60
+ADAPT_C     = 8          # mas alto = mas estricto -> menos ruido del piso
+MORPH_KSIZE = (7, 7)     # kernel de cierre (une huecos de la linea)
+OPEN_KSIZE  = (3, 3)     # kernel de apertura (elimina manchas pequeñas)
+MIN_CONTOUR_AREA = 150   # area minima mayor -> descarta ruido residual
 
 # Recovery
 RECOVERY_FRAMES = 25
@@ -81,7 +82,8 @@ ST_EXEC_FWD  = 'exec_ahead'
 class ContourLineDetector:
 
     def __init__(self):
-        self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
+        self._kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
+        self._kernel_open  = cv2.getStructuringElement(cv2.MORPH_RECT, OPEN_KSIZE)
 
     def _best_contour(self, contours, roi_w, roi_h):
         best = None; best_d = float('inf')
@@ -108,11 +110,14 @@ class ContourLineDetector:
 
         roi  = frame[roi_y0:h, roi_x0:roi_x1]
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5,5), 0)
+        gray = cv2.GaussianBlur(gray, (7, 7), 0)   # blur mayor suaviza mas el ruido
         mask = cv2.adaptiveThreshold(gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
             ADAPT_BLOCK, ADAPT_C)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
+        # 1. Apertura: elimina manchas pequenas (ruido del piso, grietas, polvo)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  self._kernel_open)
+        # 2. Cierre: une los huecos dentro de la linea
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel_close)
 
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
