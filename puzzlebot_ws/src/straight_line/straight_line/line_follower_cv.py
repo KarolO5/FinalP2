@@ -126,8 +126,9 @@ class ContourLineDetector:
         top_l = (int(w * TRAP_TOP_LEFT),  roi_y0)
         top_r = (int(w * TRAP_TOP_RIGHT), roi_y0)
 
-        # Centro horizontal del trapecio (para calcular el error)
-        cx_center = (top_l[0] + top_r[0] + bot_l[0] + bot_r[0]) // 4
+        # Centro de referencia = centro optico real del frame (w//2)
+        # NO el centroide geometrico del trapecio, que puede estar desplazado
+        cx_center = w // 2
         # Ancho de referencia en la fila inferior (para normalizar)
         ref_width = bot_r[0] - bot_l[0]
 
@@ -169,8 +170,8 @@ class ContourLineDetector:
         best_cnt = None
 
         roi_h_local = h - roi_y0
-        # Referencia: centro horizontal del trapecio, fila inferior
-        ref_x_local = (bot_l[0] + bot_r[0]) / 2.0 - bbox_x0
+        # Referencia: centro optico del frame, fila inferior
+        ref_x_local = float(w // 2) - bbox_x0
         ref_y_local = float(roi_h_local)
 
         if contours:
