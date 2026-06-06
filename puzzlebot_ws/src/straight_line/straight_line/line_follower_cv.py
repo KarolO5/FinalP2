@@ -8,12 +8,19 @@
 #  +---------+-------------------+---------+
 #  |         |   zona ignorada   |         |  <- parte superior (ROI_TOP_FRAC)
 #  +---------+-------------------+---------+
-#  | ignor.  |   ZONA ACTIVA     | ignor.  |  <- 40% inferior
+#  | ignor.  |   ZONA ACTIVA     | ignor.  |  <- 45% inferior
 #  | 30% izq |   40% central     | 30% der |
 #  +---------+-------------------+---------+
 #
-# Esto evita confundir la linea central con las lineas laterales del circuito
-# cuando hay curvas.
+# Seleccion de contorno:
+#   Se descarta el criterio de "mayor area" (confunde linea exterior con central).
+#   En su lugar se elige el contorno cuyo centroide esta mas cerca del
+#   centro-inferior del ROI (= el punto del suelo mas cercano al robot).
+#   Esto hace que el robot "siga" la linea que tiene debajo, no la de enfrente.
+#
+# Velocidad dinamica:
+#   v = LINEAR_VEL * (1 - SPEED_REDUCTION * |error|)
+#   En curva (error alto) el robot frena automaticamente y puede girar mas.
 #
 # TOPICOS
 # -------
@@ -39,34 +46,40 @@ from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 # PARAMETROS
 # -----------------------------------------------------------------------
 
-LINEAR_VEL  = 0.15
-MAX_ANGULAR = 0.60
+# Velocidad base (m/s)
+LINEAR_VEL    = 0.18
+MIN_VEL       = 0.05      # velocidad minima en curva cerrada
 
-KP = 1.6
-KI = 0.04
-KD = 0.30
-MAX_INTEGRAL = 0.40
+# Reduccion de velocidad proporcional al error: v = v_base * (1 - k*|e|)
+SPEED_REDUCTION = 0.75    # 0=sin reduccion, 1=para completamente en error=1
 
-# ROI vertical: el ROI empieza en este porcentaje del alto (ignora la parte superior)
-ROI_TOP_FRAC = 0.55
+# PID
+MAX_ANGULAR  = 1.2        # aumentado para poder girar mas rapido en curvas
+KP = 2.0
+KI = 0.03
+KD = 0.25
+MAX_INTEGRAL = 0.35
 
-# ROI horizontal: zona activa central (ignora los lados)
-ROI_LEFT_FRAC  = 0.30   # ignora el 30% izquierdo
-ROI_RIGHT_FRAC = 0.70   # ignora el 30% derecho (zona activa = 40% central)
+# ROI vertical
+ROI_TOP_FRAC = 0.58
+
+# ROI horizontal (zona activa central)
+ROI_LEFT_FRAC  = 0.28
+ROI_RIGHT_FRAC = 0.72
 
 # Umbral adaptativo
-ADAPT_BLOCK = 31
-ADAPT_C     = 8
+ADAPT_BLOCK = 25
+ADAPT_C     = 6
 
 # Morfologia
-MORPH_KSIZE = (9, 9)
+MORPH_KSIZE = (7, 7)
 
-# Area minima del contorno para considerarlo linea valida (px^2)
-MIN_CONTOUR_AREA = 80
+# Area minima del contorno (px^2)
+MIN_CONTOUR_AREA = 60
 
 # Recovery
-RECOVERY_FRAMES = 25
-RECOVERY_OMEGA  = 0.20
+RECOVERY_FRAMES = 20
+RECOVERY_OMEGA  = 0.25
 
 
 # -----------------------------------------------------------------------
@@ -78,6 +91,34 @@ class ContourLineDetector:
     def __init__(self):
         self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
 
+    def _best_contour(self, contours, roi_w, roi_h):
+        """
+        Selecciona el contorno cuyo centroide esta mas cerca del
+        punto de referencia: centro horizontal, fila inferior del ROI.
+        Esto favorece la linea mas cercana al robot (la que pisa)
+        sobre las lineas del fondo o laterales.
+        """
+        ref_x = roi_w / 2.0
+        ref_y = float(roi_h)   # fila inferior = mas cercana al robot
+
+        best   = None
+        best_d = float('inf')
+
+        for cnt in contours:
+            if cv2.contourArea(cnt) < MIN_CONTOUR_AREA:
+                continue
+            M = cv2.moments(cnt)
+            if M['m00'] == 0:
+                continue
+            cx = M['m10'] / M['m00']
+            cy = M['m01'] / M['m00']
+            d  = ((cx - ref_x) ** 2 + (cy - ref_y) ** 2) ** 0.5
+            if d < best_d:
+                best_d = d
+                best   = cnt
+
+        return best
+
     def process(self, frame: np.ndarray):
         h, w = frame.shape[:2]
 
@@ -86,8 +127,8 @@ class ContourLineDetector:
         roi_x0 = int(w * ROI_LEFT_FRAC)
         roi_x1 = int(w * ROI_RIGHT_FRAC)
         roi_w  = roi_x1 - roi_x0
+        roi_h  = h - roi_y0
 
-        # Recortar la zona activa
         roi = frame[roi_y0:h, roi_x0:roi_x1]
 
         # Umbral adaptativo
@@ -103,82 +144,95 @@ class ContourLineDetector:
         # Cierre morfologico
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
 
-        # Contorno de mayor area dentro de la zona activa
+        # Contornos
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
         found    = False
-        # cx_line en coordenadas de la zona activa (0..roi_w)
         cx_roi   = roi_w // 2
+        cy_roi   = roi_h // 2
         best_cnt = None
 
         if contours:
-            best_cnt = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(best_cnt) >= MIN_CONTOUR_AREA:
+            best_cnt = self._best_contour(contours, roi_w, roi_h)
+            if best_cnt is not None:
                 M = cv2.moments(best_cnt)
                 if M['m00'] > 0:
                     cx_roi = int(M['m10'] / M['m00'])
+                    cy_roi = int(M['m01'] / M['m00'])
                     found  = True
 
-        # Error relativo al centro de la zona activa, normalizado [-1, 1]
+        # Error relativo al centro de la zona activa [-1, 1]
         error_norm = float((roi_w / 2 - cx_roi) / (roi_w / 2))
 
-        # cx en coordenadas del frame completo (para dibujar)
-        cx_frame = roi_x0 + cx_roi
-        cx_center_frame = (roi_x0 + roi_x1) // 2
+        # Coordenadas absolutas para dibujar
+        cx_frame      = roi_x0 + cx_roi
+        cy_frame      = roi_y0 + cy_roi
+        cx_center_abs = (roi_x0 + roi_x1) // 2
 
         # ---------------------------------------------------------------
         # Frame de debug
         # ---------------------------------------------------------------
         debug = frame.copy()
 
-        # 1. Oscurecer zona fuera del ROI vertical (parte superior)
+        # Oscurecer zona superior (fuera del ROI vertical)
         ov = debug.copy()
         cv2.rectangle(ov, (0, 0), (w, roi_y0), (0, 0, 0), -1)
         cv2.addWeighted(ov, 0.65, debug, 0.35, 0, debug)
 
-        # 2. Oscurecer franjas laterales ignoradas
+        # Oscurecer franjas laterales ignoradas (tinte azul)
         ov2 = debug.copy()
-        cv2.rectangle(ov2, (0, roi_y0), (roi_x0, h), (0, 0, 60), -1)
-        cv2.rectangle(ov2, (roi_x1, roi_y0), (w, h), (0, 0, 60), -1)
-        cv2.addWeighted(ov2, 0.6, debug, 0.4, 0, debug)
+        cv2.rectangle(ov2, (0, roi_y0), (roi_x0, h), (30, 0, 80), -1)
+        cv2.rectangle(ov2, (roi_x1, roi_y0), (w, h), (30, 0, 80), -1)
+        cv2.addWeighted(ov2, 0.55, debug, 0.45, 0, debug)
 
-        # 3. Overlay verde de la mascara binaria SOLO en zona activa
-        mask_color = np.zeros((h - roi_y0, roi_w, 3), dtype=np.uint8)
+        # Overlay verde de la mascara binaria en zona activa
+        mask_color = np.zeros((roi_h, roi_w, 3), dtype=np.uint8)
         mask_color[mask > 0] = (0, 255, 0)
         debug[roi_y0:h, roi_x0:roi_x1] = cv2.addWeighted(
             debug[roi_y0:h, roi_x0:roi_x1], 0.45, mask_color, 0.55, 0
         )
 
-        # 4. Contorno detectado en cian
+        # Todos los contornos validos en gris (para ver cuantas lineas detecta)
+        for cnt in contours:
+            if cv2.contourArea(cnt) >= MIN_CONTOUR_AREA:
+                shifted = cnt.copy()
+                shifted[:, :, 0] += roi_x0
+                shifted[:, :, 1] += roi_y0
+                cv2.drawContours(debug, [shifted], -1, (120, 120, 120), 1)
+
+        # Contorno seleccionado en cian grueso
         if best_cnt is not None and found:
             shifted = best_cnt.copy()
-            shifted[:, :, 0] += roi_x0   # desplazar X
-            shifted[:, :, 1] += roi_y0   # desplazar Y
+            shifted[:, :, 0] += roi_x0
+            shifted[:, :, 1] += roi_y0
             cv2.drawContours(debug, [shifted], -1, (0, 255, 255), 3)
 
-        # 5. Bordes de la zona activa (cian grueso -- siempre visibles)
-        cv2.line(debug, (roi_x0, roi_y0), (roi_x1, roi_y0), (0, 220, 220), 3)  # top
-        cv2.line(debug, (roi_x0, roi_y0), (roi_x0, h),      (0, 220, 220), 2)  # izq
-        cv2.line(debug, (roi_x1, roi_y0), (roi_x1, h),      (0, 220, 220), 2)  # der
+        # Bordes del ROI activo (cian -- siempre visibles)
+        cv2.line(debug, (roi_x0, roi_y0), (roi_x1, roi_y0), (0, 220, 220), 3)
+        cv2.line(debug, (roi_x0, roi_y0), (roi_x0, h),      (0, 220, 220), 2)
+        cv2.line(debug, (roi_x1, roi_y0), (roi_x1, h),      (0, 220, 220), 2)
 
-        # 6. Centro de la zona activa (azul -- referencia de error=0)
-        cv2.line(debug, (cx_center_frame, roi_y0), (cx_center_frame, h), (255, 100, 0), 2)
+        # Centro de referencia (azul)
+        cv2.line(debug, (cx_center_abs, roi_y0), (cx_center_abs, h), (255, 100, 0), 2)
 
-        # 7. Centroide detectado (rojo)
-        cy_abs = roi_y0 + (h - roi_y0) // 2
+        # Punto de referencia inferior (donde busca la linea)
+        cv2.circle(debug, (cx_center_abs, h - 10), 6, (255, 200, 0), -1)
+
+        # Centroide seleccionado (rojo)
         if found:
             cv2.line(debug, (cx_frame, roi_y0), (cx_frame, h), (0, 0, 255), 2)
-            cv2.circle(debug, (cx_frame, cy_abs), 12, (0, 0, 255), -1)
-            cv2.circle(debug, (cx_frame, cy_abs), 12, (255, 255, 255), 2)
+            cv2.circle(debug, (cx_frame, cy_frame), 12, (0, 0, 255), -1)
+            cv2.circle(debug, (cx_frame, cy_frame), 12, (255, 255, 255), 2)
 
-        # 8. Flecha de error (centro -> centroide)
+        # Flecha de error
+        arr_y     = h - 20
         arr_color = (0, 255, 0) if found else (80, 80, 80)
-        cv2.arrowedLine(debug, (cx_center_frame, cy_abs), (cx_frame, cy_abs),
+        cv2.arrowedLine(debug, (cx_center_abs, arr_y), (cx_frame if found else cx_center_abs, arr_y),
                         arr_color, 3, tipLength=0.2)
 
-        # 9. Texto de estado con borde negro
+        # Texto
         txt   = 'err={:+.3f}'.format(error_norm) if found else 'SIN LINEA'
         color = (0, 255, 120) if found else (0, 60, 255)
         cv2.putText(debug, txt, (roi_x0, roi_y0 - 8),
@@ -186,8 +240,8 @@ class ContourLineDetector:
         cv2.putText(debug, txt, (roi_x0, roi_y0 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-        # 10. Mini-preview de la mascara en esquina inferior derecha
-        thumb_h = (h - roi_y0) // 3
+        # Mini-preview de la mascara
+        thumb_h = roi_h // 3
         thumb_w = roi_w // 3
         thumb   = cv2.resize(mask, (thumb_w, thumb_h))
         x0t = w - thumb_w - 4
@@ -234,11 +288,12 @@ class LineFollowerCV(Node):
         self.create_subscription(String, '/semaforo/estado', self._semaforo_cb, 10)
 
         self.get_logger().info(
-            'LineFollowerCV listo | KP={} KI={} KD={} | v={} m/s | '
-            'ROI top={}% | lateral {}%-{}%'.format(
-                KP, KI, KD, LINEAR_VEL,
+            'LineFollowerCV listo | KP={} KI={} KD={} | '
+            'v_base={} min_v={} | ROI top={}% lat={}%-{}%'.format(
+                KP, KI, KD, LINEAR_VEL, MIN_VEL,
                 int(ROI_TOP_FRAC * 100),
-                int(ROI_LEFT_FRAC * 100), int(ROI_RIGHT_FRAC * 100))
+                int(ROI_LEFT_FRAC * 100),
+                int(ROI_RIGHT_FRAC * 100))
         )
 
     def _semaforo_cb(self, msg: String):
@@ -274,7 +329,7 @@ class LineFollowerCV(Node):
             self._prev_time = None
             return
 
-        vel_factor = 0.5 if self._semaforo == 'amarillo' else 1.0
+        sem_factor = 0.5 if self._semaforo == 'amarillo' else 1.0
 
         now = self.get_clock().now().nanoseconds * 1e-9
         dt  = (now - self._prev_time) if self._prev_time is not None else 0.033
@@ -288,14 +343,18 @@ class LineFollowerCV(Node):
             self._integral   += error * dt
             self._integral    = max(-MAX_INTEGRAL, min(MAX_INTEGRAL, self._integral))
 
-            derivative        = (error - self._prev_error) / dt
-            u                 = KP * error + KI * self._integral + KD * derivative
-            u                 = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
+            derivative = (error - self._prev_error) / dt
+            u          = KP * error + KI * self._integral + KD * derivative
+            u          = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
 
             self._prev_error = error
             self._last_error = error
 
-            cmd.linear.x  = LINEAR_VEL * vel_factor
+            # Velocidad dinamica: frena en curva proporcional al error
+            speed = LINEAR_VEL * (1.0 - SPEED_REDUCTION * abs(error))
+            speed = max(MIN_VEL, speed) * sem_factor
+
+            cmd.linear.x  = speed
             cmd.angular.z = u
 
         else:
@@ -304,7 +363,7 @@ class LineFollowerCV(Node):
 
             if self._frames_lost < RECOVERY_FRAMES:
                 u             = KP * self._last_error * 0.4
-                cmd.linear.x  = LINEAR_VEL * vel_factor * 0.4
+                cmd.linear.x  = MIN_VEL * sem_factor
                 cmd.angular.z = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
             else:
                 self.get_logger().warn(
