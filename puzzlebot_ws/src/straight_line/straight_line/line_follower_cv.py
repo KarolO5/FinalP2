@@ -36,26 +36,31 @@ from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 # -----------------------------------------------------------------------
 # PARAMETROS PID
 # -----------------------------------------------------------------------
-LINEAR_VEL  = 0.09       # un poquitin mas lento para tener mas tiempo de reaccion
-MAX_ANGULAR = 0.55
-KP = 1.2
+LINEAR_VEL  = 0.09
+MAX_ANGULAR = 0.50
+
+# PID -- KP y KD reducidos para menos oscilacion
+KP = 1.0
 KI = 0.02
-KD = 0.10
+KD = 0.06
 MAX_INTEGRAL    = 0.30
 AMARILLO_FACTOR = 0.60
 SLOW_SIGN_FACTOR = 0.55
 
-# ROI: mas flaco horizontalmente para enfocarse en la linea central
+# Zona muerta: errores muy pequenos se ignoran (reduce oscilacion en recta)
+ERROR_DEADBAND  = 0.05   # si |error| < 0.05 se trata como 0
+
+# ROI
 ROI_TOP_FRAC   = 0.78
-ROI_LEFT_FRAC  = 0.33    # era 0.28 -> mas estrecho
-ROI_RIGHT_FRAC = 0.67    # era 0.72 -> 34% del ancho total
+ROI_LEFT_FRAC  = 0.33
+ROI_RIGHT_FRAC = 0.67
 
 # Vision
 ADAPT_BLOCK = 25
-ADAPT_C     = 8          # mas alto = mas estricto -> menos ruido del piso
-MORPH_KSIZE = (7, 7)     # kernel de cierre (une huecos de la linea)
-OPEN_KSIZE  = (3, 3)     # kernel de apertura (elimina manchas pequeñas)
-MIN_CONTOUR_AREA = 150   # area minima mayor -> descarta ruido residual
+ADAPT_C     = 8
+MORPH_KSIZE = (7, 7)
+OPEN_KSIZE  = (3, 3)
+MIN_CONTOUR_AREA = 150
 
 # Recovery
 RECOVERY_FRAMES = 25
@@ -64,10 +69,13 @@ RECOVERY_OMEGA  = 0.20
 # Interseccion y senales
 INTERSECT_FRAMES = 12
 STOP_DURATION    = 3.0
-TURN_LINEAR      = 0.08
+TURN_LINEAR      = 0.07
 TURN_OMEGA_L     = +0.50
-TURN_OMEGA_R     = -0.50
+TURN_OMEGA_R     = -0.65   # mas agresivo para no abrir tanto la curva
 EXEC_TIMEOUT     = 6.0
+
+# Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
+SIGN_COOLDOWN = 8.0
 
 ST_FOLLOWING = 'following'
 ST_STOP_WAIT = 'stop_wait'
@@ -210,6 +218,8 @@ class LineFollowerCV(Node):
         self._slow_sign   = False
         self._state       = ST_FOLLOWING
         self._state_t0    = 0.0
+        # Cooldown por senal: guarda el tiempo en que se activo cada senal
+        self._sign_last_t = {}   # {nombre_senal: time.monotonic()}
 
         self._pub_cmd = self.create_publisher(Twist,   '/cmd_vel',          qos_be)
         self._pub_dbg = self.create_publisher(Image,   '/vision/debug_img', 10)
@@ -234,8 +244,23 @@ class LineFollowerCV(Node):
         sign = msg.data
         if sign == self._sign:
             return
-        self.get_logger().info('Senal: {} -> {}'.format(self._sign, sign))
         self._sign = sign
+
+        if sign == 'ninguno':
+            self._slow_sign = False
+            return
+
+        # Cooldown: ignorar la misma senal si paso hace menos de SIGN_COOLDOWN seg
+        now = time.monotonic()
+        last = self._sign_last_t.get(sign, 0.0)
+        if now - last < SIGN_COOLDOWN:
+            self.get_logger().info(
+                'Senal {} ignorada (cooldown {:.1f}s restantes)'.format(
+                    sign, SIGN_COOLDOWN - (now - last)))
+            return
+
+        self.get_logger().info('Senal activada: {}'.format(sign))
+        self._sign_last_t[sign] = now
 
         if sign == 'STOP' and self._state == ST_FOLLOWING:
             self._enter(ST_STOP_WAIT)
@@ -247,8 +272,6 @@ class LineFollowerCV(Node):
             self._pending = 'ahead'; self._slow_sign = False
         elif sign in ('Crossing', 'Give'):
             self._slow_sign = True
-        elif sign == 'ninguno':
-            self._slow_sign = False
 
     def _image_cb(self, msg):
         try:
@@ -342,12 +365,14 @@ class LineFollowerCV(Node):
         cmd = Twist()
         if found:
             self._frames_lost = 0
-            self._integral   += error * dt
+            # Zona muerta: error muy pequeno se trata como 0 (evita oscilacion en recta)
+            eff_error = 0.0 if abs(error) < ERROR_DEADBAND else error
+            self._integral   += eff_error * dt
             self._integral    = max(-MAX_INTEGRAL, min(MAX_INTEGRAL, self._integral))
-            d = (error - self._prev_error) / dt
-            u = KP*error + KI*self._integral + KD*d
+            d = (eff_error - self._prev_error) / dt
+            u = KP*eff_error + KI*self._integral + KD*d
             u = max(-MAX_ANGULAR, min(MAX_ANGULAR, u))
-            self._prev_error = error; self._last_error = error
+            self._prev_error = eff_error; self._last_error = error
             cmd.linear.x = LINEAR_VEL * vel; cmd.angular.z = u
         else:
             self._integral = 0.0
