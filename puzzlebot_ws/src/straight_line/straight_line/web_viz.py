@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 # =============================================================================
-# web_viz.py  —  Servidor MJPEG sin dependencias externas (solo stdlib)
+# web_viz.py  --  Dashboard 2x2 con todos los streams simultaneos
 # =============================================================================
-# Abre http://<IP_ROBOT>:8080 desde cualquier navegador en la misma red.
-# Una sola vista con botones para cambiar entre streams.
+# Muestra los 4 streams en una sola pagina sin necesidad de cambiar pestanas.
+# Usa ThreadingHTTPServer para manejar 4 conexiones MJPEG en paralelo.
 #
-# Streams:
-#   raw      ←  /image/raw            (cámara cruda)
-#   linea    ←  /vision/debug_img     (seguidor + ROI + contorno)
-#   semaforo ←  /semaforo/debug_img   (semáforo + máscara de color)
+#  +------------------+------------------+
+#  |  RAW             |  LINEA           |
+#  +------------------+------------------+
+#  |  SEMAFORO        |  SENAL           |
+#  +------------------+------------------+
 # =============================================================================
 
+import os
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import cv2
 import numpy as np
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import rclpy
 from rclpy.node import Node
@@ -32,12 +35,18 @@ STREAMS = {
     'senal':    '/sign/debug_img',
 }
 
-# QoS por topic
 QOS_BY_KEY = {
     'raw':      'best_effort',
     'linea':    'reliable',
     'semaforo': 'reliable',
     'senal':    'reliable',
+}
+
+LABELS = {
+    'raw':      'RAW',
+    'linea':    'LINEA',
+    'semaforo': 'SEMAFORO',
+    'senal':    'SENAL',
 }
 
 HTML = b"""<!DOCTYPE html>
@@ -47,79 +56,60 @@ HTML = b"""<!DOCTYPE html>
   <title>PuzzleBot Vision</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{background:#0d0d1a;color:#eee;font-family:monospace;
-         display:flex;flex-direction:column;height:100vh}
-    header{padding:10px 18px;background:#12122a;
-           border-bottom:2px solid #00ffe7;
-           display:flex;align-items:center;gap:16px;flex-shrink:0}
-    header h1{font-size:1rem;color:#00ffe7}
-    .btns{display:flex;gap:8px}
-    button{
-      padding:6px 16px;border:1px solid #444;border-radius:4px;
-      background:#1e1e3a;color:#aaa;cursor:pointer;font-family:monospace;
-      font-size:0.85rem;transition:all .15s
-    }
-    button:hover{border-color:#00ffe7;color:#00ffe7}
-    button.active{background:#00ffe7;color:#0d0d1a;border-color:#00ffe7;font-weight:bold}
-    .badge{
-      margin-left:auto;padding:4px 10px;border-radius:4px;font-size:0.8rem;
-      background:#1e1e3a;border:1px solid #333
-    }
-    #label{color:#00ffe7}
-    .viewer{flex:1;display:flex;align-items:center;justify-content:center;
-            background:#000;overflow:hidden}
-    #feed{max-width:100%;max-height:100%;display:block;object-fit:contain}
+    body{background:#0d0d1a;color:#eee;font-family:monospace}
+    header{padding:8px 16px;background:#12122a;
+           border-bottom:2px solid #00ffe7;display:flex;align-items:center}
+    header h1{font-size:0.95rem;color:#00ffe7}
+    .grid{display:grid;grid-template-columns:1fr 1fr;
+          grid-template-rows:1fr 1fr;gap:6px;padding:6px;
+          height:calc(100vh - 38px)}
+    .cell{background:#111;border:1px solid #222;
+          border-radius:4px;overflow:hidden;display:flex;
+          flex-direction:column}
+    .cell-title{padding:3px 8px;background:#1a1a2e;
+                font-size:0.7rem;color:#00ffe7;flex-shrink:0}
+    .cell img{width:100%;flex:1;display:block;object-fit:contain;min-height:0}
   </style>
 </head>
 <body>
-  <header>
-    <h1>PuzzleBot &mdash; Vision</h1>
-    <div class="btns">
-      <button onclick="setStream('raw')"      id="btn-raw">RAW</button>
-      <button onclick="setStream('linea')"    id="btn-linea">L&Iacute;NEA</button>
-      <button onclick="setStream('semaforo')" id="btn-semaforo">SEM&Aacute;FORO</button>
-      <button onclick="setStream('senal')"    id="btn-senal">SE&Ntilde;AL</button>
+  <header><h1>PuzzleBot &mdash; Vision Dashboard</h1></header>
+  <div class="grid">
+    <div class="cell">
+      <div class="cell-title">RAW &mdash; Camara cruda</div>
+      <img src="/stream/raw" alt="raw">
     </div>
-    <div class="badge">viendo: <span id="label">raw</span></div>
-  </header>
-  <div class="viewer">
-    <img id="feed" src="/stream/raw" alt="stream">
+    <div class="cell">
+      <div class="cell-title">LINEA &mdash; Seguidor</div>
+      <img src="/stream/linea" alt="linea">
+    </div>
+    <div class="cell">
+      <div class="cell-title">SEMAFORO &mdash; Color HSV</div>
+      <img src="/stream/semaforo" alt="semaforo">
+    </div>
+    <div class="cell">
+      <div class="cell-title">SENAL &mdash; YOLO detector</div>
+      <img src="/stream/senal" alt="senal">
+    </div>
   </div>
-  <script>
-    var current = 'raw';
-    function setStream(name){
-      if(name === current) return;
-      current = name;
-      document.getElementById('feed').src = '/stream/' + name;
-      document.getElementById('label').textContent = name;
-      ['raw','linea','semaforo','senal'].forEach(function(k){
-        document.getElementById('btn-'+k).classList.toggle('active', k===name);
-      });
-    }
-    document.getElementById('btn-raw').classList.add('active');
-  </script>
 </body>
 </html>"""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Buffer de frames thread-safe
-# ─────────────────────────────────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
+# Buffer thread-safe
+# -----------------------------------------------------------------------
 class FrameBuffer:
-    def __init__(self, label: str):
-        self._lock  = threading.Lock()
-        self._data  = None
-        self._label = label
-        # Placeholder con el nombre del stream
+    def __init__(self, name: str):
+        self._lock = threading.Lock()
+        self._data = None
         img = np.zeros((240, 320, 3), dtype=np.uint8)
-        cv2.putText(img, f'Esperando: {label}', (10, 125),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 60, 60), 1)
-        _, buf = cv2.imencode('.jpg', img)
-        self._placeholder = buf.tobytes()
+        cv2.putText(img, 'Esperando: {}'.format(name), (10, 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 60, 60), 1)
+        ok, buf = cv2.imencode('.jpg', img)
+        self._placeholder = buf.tobytes() if ok else b''
 
-    def update(self, frame_bgr: np.ndarray):
-        ok, buf = cv2.imencode('.jpg', frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    def update(self, frame: np.ndarray):
+        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if ok:
             with self._lock:
                 self._data = buf.tobytes()
@@ -129,11 +119,10 @@ class FrameBuffer:
             return self._data if self._data is not None else self._placeholder
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # HTTP handler
-# ─────────────────────────────────────────────────────────────────────────────
-
-_buffers: dict = {}
+# -----------------------------------------------------------------------
+_buffers = {}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -152,60 +141,44 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith('/stream/'):
             name = self.path[len('/stream/'):]
             if name not in _buffers:
-                self.send_response(404)
-                self.end_headers()
-                return
+                self.send_response(404); self.end_headers(); return
 
             self.send_response(200)
             self.send_header('Content-Type',
                              'multipart/x-mixed-replace; boundary=frame')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
-
             buf = _buffers[name]
             try:
                 while True:
                     data = buf.read()
                     self.wfile.write(
-                        b'--frame\r\n'
-                        b'Content-Type: image/jpeg\r\n\r\n' +
-                        data + b'\r\n'
-                    )
-                    time.sleep(0.04)   # ~25 fps
+                        b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' +
+                        data + b'\r\n')
+                    time.sleep(0.05)   # ~20 fps
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
 
-        self.send_response(404)
-        self.end_headers()
+        self.send_response(404); self.end_headers()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # Nodo ROS 2
-# ─────────────────────────────────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
 class WebVizNode(Node):
 
     def __init__(self):
         super().__init__('web_viz')
 
-        qos_be = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-        qos_rel = QoSProfile(
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=10,
-        )
-        qos_map = {
-            'best_effort': qos_be,
-            'reliable':    qos_rel,
-        }
+        qos_be = QoSProfile(reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                            history=QoSHistoryPolicy.KEEP_LAST, depth=1)
+        qos_rel = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
+                             history=QoSHistoryPolicy.KEEP_LAST, depth=10)
+        qos_map = {'best_effort': qos_be, 'reliable': qos_rel}
 
         self._bridge  = CvBridge()
-        self._buffers = {key: FrameBuffer(key) for key in STREAMS}
+        self._buffers = {k: FrameBuffer(k) for k in STREAMS}
 
         for key, topic in STREAMS.items():
             buf = self._buffers[key]
@@ -213,36 +186,31 @@ class WebVizNode(Node):
             self.create_subscription(
                 Image, topic,
                 lambda msg, b=buf: self._cb(msg, b),
-                qos,
-            )
+                qos)
 
         self.get_logger().info(
-            f'WebVizNode listo → http://0.0.0.0:{PORT}  '
-            f'| streams: {list(STREAMS.keys())}'
-        )
+            'WebVizNode listo -> http://0.0.0.0:{} | grid 2x2'.format(PORT))
 
     def _cb(self, msg: Image, buf: FrameBuffer):
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             buf.update(frame)
         except Exception as e:
-            self.get_logger().warn(f'cv_bridge: {e}')
+            self.get_logger().warn('cv_bridge: {}'.format(e))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
 def main(args=None):
     global _buffers
-
     rclpy.init(args=args)
     node = WebVizNode()
     _buffers = node._buffers
 
-    server = HTTPServer(('0.0.0.0', PORT), Handler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
+    server = ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
 
     try:
         rclpy.spin(node)
