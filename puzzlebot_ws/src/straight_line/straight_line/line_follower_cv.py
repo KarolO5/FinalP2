@@ -41,16 +41,16 @@ from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 # PARAMETROS  -- ajusta estos sin tocar la logica
 # -----------------------------------------------------------------------
 
-LINEAR_VEL  = 0.15       # m/s, constante
+LINEAR_VEL  = 0.13       # m/s, constante
 MAX_ANGULAR = 0.60       # rad/s maximo
 
-KP = 1.6
-KI = 0.04
-KD = 0.30
-MAX_INTEGRAL = 0.40
+KP = 1.4
+KI = 0.03
+KD = 0.15
+MAX_INTEGRAL = 0.35
 
 # ROI vertical: ignorar el porcentaje superior del frame
-ROI_TOP_FRAC = 0.58
+ROI_TOP_FRAC = 0.68      # sube para mirar solo lo mas cercano al robot
 
 # ROI horizontal: zona activa central (ignorar lados)
 ROI_LEFT_FRAC  = 0.30
