@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 # =============================================================================
-# line_follower_cv.py  --  Seguidor de linea por contorno + PID
+# line_follower_cv.py  --  Seguidor de linea con ROI trapezoidal
 # =============================================================================
 #
-# ROI activa: franja inferior + zona central del ancho
+# ROI en forma de TRAPECIO perspectivo:
 #
-#  +---------+-------------------+---------+
-#  |         |   zona ignorada   |         |  <- ROI_TOP_FRAC
-#  +---------+-------------------+---------+
-#  | ignor.  |   ZONA ACTIVA     | ignor.  |
-#  | 30% izq |   40% central     | 30% der |
-#  +---------+-------------------+---------+
+#      [TOP_L]-----------[TOP_R]       <- fila roi_y0  (estrecho = lejos)
+#       /                       \
+#      /                         \
+#  [BOT_L]-------------------[BOT_R]  <- fila h       (ancho = cerca del robot)
 #
-# Seleccion de contorno:
-#   El contorno cuyo centroide esta mas cerca del centro-inferior del ROI
-#   (la linea mas proxima al robot), NO el de mayor area.
+# Fracciones del ancho total del frame:
+#   Abajo : BOT_LEFT=0.22  ..  BOT_RIGHT=0.78  (56% del ancho)
+#   Arriba: TOP_LEFT=0.35  ..  TOP_RIGHT=0.65  (30% del ancho)
+#
+# Esto compensa la perspectiva: las lineas laterales lejanas aparecen
+# mas juntas en la imagen y quedan FUERA del trapecio superior,
+# evitando confusion con la linea central.
+#
+# Estrategia de deteccion:
+#   1. Mascara trapezoidal aplicada al frame
+#   2. Umbral adaptativo gaussiano (robusto a cambios de luz)
+#   3. Cierre morfologico para rellenar huecos
+#   4. Contorno mas cercano al centro-inferior del trapecio
+#   5. Centroide con momentos de imagen -> error normalizado [-1,1]
+#   6. Controlador PID
 #
 # TOPICOS
 # -------
@@ -40,7 +50,7 @@ from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 # PARAMETROS
 # -----------------------------------------------------------------------
 
-LINEAR_VEL  = 0.11       # m/s, constante
+LINEAR_VEL  = 0.11
 MAX_ANGULAR = 0.60
 
 KP = 1.4
@@ -48,15 +58,18 @@ KI = 0.03
 KD = 0.15
 MAX_INTEGRAL = 0.35
 
-# Semaforo: amarillo reduce velocidad al 60% (reduccion del 40%)
-AMARILLO_FACTOR = 0.60
+AMARILLO_FACTOR = 0.60   # velocidad al 60% con semaforo amarillo (reduccion 40%)
 
-# ROI vertical
-ROI_TOP_FRAC = 0.72
+# ROI vertical: donde empieza el trapecio (parte superior)
+ROI_TOP_FRAC = 0.58      # 42% inferior del frame analizado
 
-# ROI horizontal
-ROI_LEFT_FRAC  = 0.30
-ROI_RIGHT_FRAC = 0.70
+# Trapecio horizontal (fracciones del ancho del frame)
+# Fila inferior (cerca del robot) -- mas ancho
+TRAP_BOT_LEFT  = 0.22
+TRAP_BOT_RIGHT = 0.78
+# Fila superior (lejos) -- mas estrecho para evitar lineas laterales
+TRAP_TOP_LEFT  = 0.36
+TRAP_TOP_RIGHT = 0.64
 
 # Umbral adaptativo
 ADAPT_BLOCK = 25
@@ -82,10 +95,8 @@ class ContourLineDetector:
     def __init__(self):
         self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
 
-    def _best_contour(self, contours, roi_w, roi_h):
-        """Contorno cuyo centroide esta mas cerca del centro-inferior del ROI."""
-        ref_x  = roi_w / 2.0
-        ref_y  = float(roi_h)
+    def _best_contour(self, contours, ref_x, ref_y):
+        """Contorno cuyo centroide esta mas cerca del punto de referencia."""
         best   = None
         best_d = float('inf')
 
@@ -108,12 +119,34 @@ class ContourLineDetector:
         h, w = frame.shape[:2]
 
         roi_y0 = int(h * ROI_TOP_FRAC)
-        roi_x0 = int(w * ROI_LEFT_FRAC)
-        roi_x1 = int(w * ROI_RIGHT_FRAC)
-        roi_w  = roi_x1 - roi_x0
-        roi_h  = h - roi_y0
 
-        roi  = frame[roi_y0:h, roi_x0:roi_x1]
+        # Vertices del trapecio en coordenadas del frame completo
+        bot_l = (int(w * TRAP_BOT_LEFT),  h)
+        bot_r = (int(w * TRAP_BOT_RIGHT), h)
+        top_l = (int(w * TRAP_TOP_LEFT),  roi_y0)
+        top_r = (int(w * TRAP_TOP_RIGHT), roi_y0)
+
+        # Centro horizontal del trapecio (para calcular el error)
+        cx_center = (top_l[0] + top_r[0] + bot_l[0] + bot_r[0]) // 4
+        # Ancho de referencia en la fila inferior (para normalizar)
+        ref_width = bot_r[0] - bot_l[0]
+
+        # ---- Mascara trapezoidal ----
+        trap_mask = np.zeros((h, w), dtype=np.uint8)
+        pts = np.array([bot_l, bot_r, top_r, top_l], dtype=np.int32)
+        cv2.fillPoly(trap_mask, [pts], 255)
+
+        # ---- ROI recortado al bounding box del trapecio para procesar ----
+        roi_x0 = top_l[0]
+        roi_x1 = top_r[0]   # usamos el ancho superior como bbox izq/der
+        # Para el bbox completo tomamos los extremos del trapecio
+        bbox_x0 = bot_l[0]
+        bbox_x1 = bot_r[0]
+
+        roi = frame[roi_y0:h, bbox_x0:bbox_x1].copy()
+        # Aplicar mascara trapezoidal recortada al bbox
+        trap_local = trap_mask[roi_y0:h, bbox_x0:bbox_x1]
+
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         mask = cv2.adaptiveThreshold(
@@ -123,93 +156,115 @@ class ContourLineDetector:
             ADAPT_BLOCK, ADAPT_C,
         )
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)
+        # Solo conservar pixeles dentro del trapecio
+        mask = cv2.bitwise_and(mask, trap_local)
 
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
         found    = False
-        cx_roi   = roi_w // 2
-        cy_roi   = roi_h // 2
+        cx_abs   = cx_center
+        cy_abs   = roi_y0 + (h - roi_y0) // 2
         best_cnt = None
 
-        if contours:
-            res = self._best_contour(contours, roi_w, roi_h)
-            if res is not None:
-                best_cnt, cx_roi, cy_roi = res
-                found = True
+        roi_h_local = h - roi_y0
+        # Referencia: centro horizontal del trapecio, fila inferior
+        ref_x_local = (bot_l[0] + bot_r[0]) / 2.0 - bbox_x0
+        ref_y_local = float(roi_h_local)
 
-        error_norm    = float((roi_w / 2 - cx_roi) / (roi_w / 2))
-        cx_frame      = roi_x0 + cx_roi
-        cy_frame      = roi_y0 + cy_roi
-        cx_center_abs = (roi_x0 + roi_x1) // 2
+        if contours:
+            res = self._best_contour(contours, ref_x_local, ref_y_local)
+            if res is not None:
+                cnt, cx_local, cy_local = res
+                best_cnt = cnt
+                cx_abs   = bbox_x0 + cx_local
+                cy_abs   = roi_y0  + cy_local
+                found    = True
+
+        # Error: desplazamiento del centroide respecto al centro del trapecio
+        # normalizado por el semi-ancho inferior
+        error_norm = float((cx_center - cx_abs) / (ref_width / 2))
+        error_norm = max(-1.0, min(1.0, error_norm))
 
         # ---------------------------------------------------------------
         # Debug
         # ---------------------------------------------------------------
         debug = frame.copy()
 
-        ov = debug.copy()
-        cv2.rectangle(ov, (0, 0), (w, roi_y0), (0, 0, 0), -1)
-        cv2.addWeighted(ov, 0.65, debug, 0.35, 0, debug)
+        # Oscurecer zona fuera del trapecio
+        inv_mask = cv2.bitwise_not(trap_mask)
+        # Zona superior (fuera del ROI vertical)
+        inv_top = np.zeros_like(trap_mask)
+        inv_top[:roi_y0, :] = 255
+        outside = cv2.bitwise_or(inv_mask, inv_top)
+        dark = debug.copy()
+        dark[outside > 0] = (dark[outside > 0] * 0.25).astype(np.uint8)
+        debug = dark
 
-        ov2 = debug.copy()
-        cv2.rectangle(ov2, (0, roi_y0), (roi_x0, h), (30, 0, 80), -1)
-        cv2.rectangle(ov2, (roi_x1, roi_y0), (w, h), (30, 0, 80), -1)
-        cv2.addWeighted(ov2, 0.55, debug, 0.45, 0, debug)
+        # Overlay verde de la mascara binaria dentro del trapecio
+        mask_full = np.zeros((h, w), dtype=np.uint8)
+        mask_full[roi_y0:h, bbox_x0:bbox_x1] = mask
+        mask_color = np.zeros_like(frame)
+        mask_color[mask_full > 0] = (0, 255, 0)
+        debug = cv2.addWeighted(debug, 0.5, mask_color, 0.5, 0)
 
-        mask_color = np.zeros((roi_h, roi_w, 3), dtype=np.uint8)
-        mask_color[mask > 0] = (0, 255, 0)
-        debug[roi_y0:h, roi_x0:roi_x1] = cv2.addWeighted(
-            debug[roi_y0:h, roi_x0:roi_x1], 0.45, mask_color, 0.55, 0
-        )
-
+        # Todos los contornos validos en gris
         for cnt in contours:
             if cv2.contourArea(cnt) >= MIN_CONTOUR_AREA:
                 s = cnt.copy()
-                s[:, :, 0] += roi_x0
+                s[:, :, 0] += bbox_x0
                 s[:, :, 1] += roi_y0
                 cv2.drawContours(debug, [s], -1, (120, 120, 120), 1)
 
+        # Contorno seleccionado en cian
         if best_cnt is not None and found:
             s = best_cnt.copy()
-            s[:, :, 0] += roi_x0
+            s[:, :, 0] += bbox_x0
             s[:, :, 1] += roi_y0
             cv2.drawContours(debug, [s], -1, (0, 255, 255), 3)
 
-        cv2.line(debug, (roi_x0, roi_y0), (roi_x1, roi_y0), (0, 220, 220), 3)
-        cv2.line(debug, (roi_x0, roi_y0), (roi_x0, h),      (0, 220, 220), 2)
-        cv2.line(debug, (roi_x1, roi_y0), (roi_x1, h),      (0, 220, 220), 2)
-        cv2.line(debug, (cx_center_abs, roi_y0), (cx_center_abs, h), (255, 100, 0), 2)
+        # Dibujar trapecio (borde cian)
+        cv2.polylines(debug, [pts], True, (0, 220, 220), 2)
 
+        # Linea central de referencia (azul)
+        cv2.line(debug, (cx_center, roi_y0), (cx_center, h), (255, 100, 0), 2)
+
+        # Centroide detectado (rojo)
         if found:
-            cv2.line(debug, (cx_frame, roi_y0), (cx_frame, h), (0, 0, 255), 2)
-            cv2.circle(debug, (cx_frame, cy_frame), 12, (0, 0, 255), -1)
-            cv2.circle(debug, (cx_frame, cy_frame), 12, (255, 255, 255), 2)
+            cv2.line(debug, (cx_abs, roi_y0), (cx_abs, h), (0, 0, 255), 2)
+            cv2.circle(debug, (cx_abs, cy_abs), 12, (0, 0, 255), -1)
+            cv2.circle(debug, (cx_abs, cy_abs), 12, (255, 255, 255), 2)
 
+        # Flecha de error
         arr_y     = h - 20
         arr_color = (0, 255, 0) if found else (80, 80, 80)
         cv2.arrowedLine(debug,
-                        (cx_center_abs, arr_y),
-                        (cx_frame if found else cx_center_abs, arr_y),
+                        (cx_center, arr_y),
+                        (cx_abs if found else cx_center, arr_y),
                         arr_color, 3, tipLength=0.2)
 
+        # Texto
         txt   = 'err={:+.3f}'.format(error_norm) if found else 'SIN LINEA'
         color = (0, 255, 120) if found else (0, 60, 255)
-        cv2.putText(debug, txt, (roi_x0, roi_y0 - 8),
+        cv2.putText(debug, txt, (top_l[0], roi_y0 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 5)
-        cv2.putText(debug, txt, (roi_x0, roi_y0 - 8),
+        cv2.putText(debug, txt, (top_l[0], roi_y0 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-        thumb_h = roi_h // 3
-        thumb_w = roi_w // 3
-        thumb   = cv2.resize(mask, (thumb_w, thumb_h))
-        x0t = w - thumb_w - 4
-        y0t = h - thumb_h - 4
-        debug[y0t:y0t + thumb_h, x0t:x0t + thumb_w] = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
-        cv2.rectangle(debug, (x0t, y0t), (x0t + thumb_w, y0t + thumb_h), (150, 150, 150), 1)
-        cv2.putText(debug, 'MASK', (x0t + 3, y0t + 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        # Mini-preview mascara
+        roi_h_local2 = h - roi_y0
+        roi_w_local2 = bbox_x1 - bbox_x0
+        if roi_h_local2 > 0 and roi_w_local2 > 0:
+            th = roi_h_local2 // 3
+            tw = roi_w_local2 // 3
+            thumb = cv2.resize(mask, (tw, th))
+            x0t = w - tw - 4
+            y0t = h - th - 4
+            debug[y0t:y0t + th, x0t:x0t + tw] = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
+            cv2.rectangle(debug, (x0t, y0t), (x0t + tw, y0t + th), (150, 150, 150), 1)
+            cv2.putText(debug, 'MASK', (x0t + 3, y0t + 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
         return error_norm, found, debug
 
@@ -248,8 +303,10 @@ class LineFollowerCV(Node):
 
         self.get_logger().info(
             'LineFollowerCV listo | KP={} KI={} KD={} | v={} m/s | '
-            'amarillo={}%'.format(KP, KI, KD, LINEAR_VEL,
-                                  int(AMARILLO_FACTOR * 100))
+            'trapecio BOT={}%-{}% TOP={}%-{}%'.format(
+                KP, KI, KD, LINEAR_VEL,
+                int(TRAP_BOT_LEFT*100), int(TRAP_BOT_RIGHT*100),
+                int(TRAP_TOP_LEFT*100), int(TRAP_TOP_RIGHT*100))
         )
 
     def _semaforo_cb(self, msg: String):
