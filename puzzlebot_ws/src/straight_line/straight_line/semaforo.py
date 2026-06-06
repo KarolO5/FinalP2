@@ -57,8 +57,9 @@ YELLOW_HI = np.array([ 35, 255, 255])
 GREEN_LO  = np.array([ 40,  80,  60])
 GREEN_HI  = np.array([ 90, 255, 255])
 
-# Pixeles minimos para considerar deteccion valida
-MIN_PIXELS = 150
+# Fraccion minima del area del ROI que debe estar cubierta por el color
+# para confirmar deteccion. 0.20 = 20% del ROI.
+MIN_ROI_FRACTION = 0.20
 
 
 # -----------------------------------------------------------------------
@@ -115,7 +116,11 @@ class SemaforoNode(Node):
         roi_x0 = int(w * (1.0 - ROI_W_FRAC))
         roi_x1 = w
 
-        roi     = frame[roi_y0:roi_y1, roi_x0:roi_x1]
+        roi      = frame[roi_y0:roi_y1, roi_x0:roi_x1]
+        roi_area = roi.shape[0] * roi.shape[1]
+        # Umbral: 20% del area del ROI
+        min_px   = int(roi_area * MIN_ROI_FRACTION)
+
         blurred = cv2.GaussianBlur(roi, (7, 7), 0)
         hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
@@ -128,13 +133,13 @@ class SemaforoNode(Node):
         px_yellow = int(cv2.countNonZero(mask_yellow))
         px_green  = int(cv2.countNonZero(mask_green))
 
-        # Color dominante
+        # Color dominante -- debe cubrir al menos MIN_ROI_FRACTION del ROI
         color_det = 'ninguno'
-        if px_red >= MIN_PIXELS and px_red >= px_yellow and px_red >= px_green:
+        if px_red >= min_px and px_red >= px_yellow and px_red >= px_green:
             color_det = 'rojo'
-        elif px_yellow >= MIN_PIXELS and px_yellow >= px_green:
+        elif px_yellow >= min_px and px_yellow >= px_green:
             color_det = 'amarillo'
-        elif px_green >= MIN_PIXELS:
+        elif px_green >= min_px:
             color_det = 'verde'
 
         # Transicion de estado persistente
@@ -194,9 +199,13 @@ class SemaforoNode(Node):
         # Borde del ROI (grueso, siempre visible)
         cv2.rectangle(debug, (roi_x0, roi_y0), (roi_x1 - 1, roi_y1), box_color, 3)
 
-        # Texto de estado
-        label = '{} R={} A={} V={}'.format(
-            self._estado_actual.upper(), px_red, px_yellow, px_green)
+        # Texto de estado -- muestra porcentaje sobre el ROI
+        pct_r = int(100 * px_red    / roi_area)
+        pct_a = int(100 * px_yellow / roi_area)
+        pct_v = int(100 * px_green  / roi_area)
+        label = '{} R={}% A={}% V={}% (min {}%)'.format(
+            self._estado_actual.upper(), pct_r, pct_a, pct_v,
+            int(MIN_ROI_FRACTION * 100))
         cv2.putText(debug, label, (roi_x0, roi_y1 + 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4)
         cv2.putText(debug, label, (roi_x0, roi_y1 + 22),
