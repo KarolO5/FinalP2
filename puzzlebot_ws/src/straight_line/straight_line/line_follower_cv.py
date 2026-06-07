@@ -55,12 +55,12 @@ ROI_LEFT_FRAC  = 0.33
 ROI_RIGHT_FRAC = 0.67
 
 # Vision
-ADAPT_BLOCK = 27
-ADAPT_C     = 10          # entre 8 y 12: menos ruido sin perder la linea real
+ADAPT_BLOCK = 25
+ADAPT_C     = 8
 MORPH_KSIZE = (7, 7)
-OPEN_KSIZE  = (5, 5)      # apertura mayor elimina manchas medianas
-MIN_CONTOUR_AREA  = 300   # entre 200 y 400: filtra ruido sin perder la linea
-MAX_ASPECT_RATIO  = 3.0
+OPEN_KSIZE  = (3, 3)
+MIN_CONTOUR_AREA  = 200   # un poco mayor para ignorar punteados pequenos
+MAX_ASPECT_RATIO  = 2.5   # ancho/alto maximo: >2.5 = horizontal = junta o punteado
 
 # Recovery
 RECOVERY_FRAMES = 25
@@ -73,7 +73,6 @@ TURN_LINEAR      = 0.07
 TURN_OMEGA_L     = +0.50
 TURN_OMEGA_R     = -0.65   # mas agresivo para no abrir tanto la curva
 EXEC_TIMEOUT     = 6.0
-EXEC_MIN_TIME    = 0.8    # segundos minimos ejecutando antes de aceptar found=True
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
@@ -319,9 +318,7 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_L:
-            elapsed = now - self._state_t0
-            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
-            if done:
+            if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
@@ -329,9 +326,7 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_R:
-            elapsed = now - self._state_t0
-            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
-            if done:
+            if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_R
@@ -339,9 +334,7 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_FWD:
-            elapsed = now - self._state_t0
-            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
-            if done:
+            if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
@@ -351,18 +344,12 @@ class LineFollowerCV(Node):
         # FOLLOWING
         if not found:
             self._frames_lost += 1
-            if self._pending:
-                # Con accion pendiente: ejecutar rapido (3 frames) sin recovery
-                if self._frames_lost >= 3:
-                    self.get_logger().info('Interseccion! accion: {}'.format(self._pending))
-                    if self._pending == 'left':   self._enter(ST_EXEC_L)
-                    elif self._pending == 'right': self._enter(ST_EXEC_R)
-                    else:                          self._enter(ST_EXEC_FWD)
-                return   # no hacer PID/recovery mientras esperamos
-            else:
-                # Sin accion pendiente: comportamiento original
-                if self._frames_lost >= INTERSECT_FRAMES:
-                    pass   # deja caer al PID con found=False (recovery normal)
+            if self._frames_lost >= INTERSECT_FRAMES and self._pending:
+                self.get_logger().info('Interseccion! accion: {}'.format(self._pending))
+                if self._pending == 'left':   self._enter(ST_EXEC_L)
+                elif self._pending == 'right': self._enter(ST_EXEC_R)
+                else:                          self._enter(ST_EXEC_FWD)
+                return
         else:
             self._frames_lost = 0
 
