@@ -1,6 +1,7 @@
 #!/bin/bash
 source /opt/ros/jazzy/setup.bash
 source ~/uros_ws/install/setup.bash
+source ~/ros2_ws/install/setup.bash
 source ~/FinalP2/puzzlebot_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
