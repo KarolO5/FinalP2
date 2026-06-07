@@ -7,6 +7,10 @@ export FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA   # evita uso excesivo de /dev/shm
 
 ROBOT_IP=$(hostname -I | awk '{print $1}')
 
+# Liberar puerto 8080 si quedó ocupado de sesion anterior
+fuser -k 8080/tcp 2>/dev/null || true
+sleep 0.5
+
 # micro_ros_agent se corre manualmente desde otro SSH:
 # ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
 
