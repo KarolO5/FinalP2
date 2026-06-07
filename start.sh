@@ -3,7 +3,7 @@ source /opt/ros/jazzy/setup.bash
 source ~/uros_ws/install/setup.bash
 source ~/FinalP2/puzzlebot_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export FASTDDS_BUILTIN_TRANSPORTS=UDP   # deshabilita /dev/shm (zero-copy) -> evita que se llene
+export FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA   # evita uso excesivo de /dev/shm
 
 ROBOT_IP=$(hostname -I | awk '{print $1}')
 
