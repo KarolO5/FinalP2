@@ -59,8 +59,10 @@ ADAPT_BLOCK = 25
 ADAPT_C     = 8
 MORPH_KSIZE = (7, 7)
 OPEN_KSIZE  = (3, 3)
-MIN_CONTOUR_AREA  = 200   # un poco mayor para ignorar punteados pequenos
-MAX_ASPECT_RATIO  = 2.5   # ancho/alto maximo: >2.5 = horizontal = junta o punteado
+MIN_CONTOUR_AREA  = 200
+MAX_ASPECT_RATIO  = 2.5
+MIN_FILL_RATIO    = 0.40  # area / (bw*bh): linea solida ~0.6-0.9
+                          # punteados unidos por cierre ~0.15-0.35 -> rechazados
 
 # Recovery
 RECOVERY_FRAMES = 25
@@ -99,10 +101,16 @@ class ContourLineDetector:
         for cnt in contours:
             if cv2.contourArea(cnt) < MIN_CONTOUR_AREA:
                 continue
-            # Filtro de aspecto: rechazar contornos muy horizontales
-            # (juntas de piezas de pista y linea punteada son mas anchos que altos)
             bx, by, bw, bh = cv2.boundingRect(cnt)
-            if bh == 0 or bw / float(bh) > MAX_ASPECT_RATIO:
+            if bh == 0:
+                continue
+            # Filtro aspecto: rechaza franjas muy horizontales
+            if bw / float(bh) > MAX_ASPECT_RATIO:
+                continue
+            # Filtro fill ratio: rechaza punteados unidos (area/bbox baja)
+            # La linea solida llena bien su bbox; punteados dejan huecos
+            fill = cv2.contourArea(cnt) / float(bw * bh)
+            if fill < MIN_FILL_RATIO:
                 continue
             M = cv2.moments(cnt)
             if M['m00'] == 0:
