@@ -68,7 +68,8 @@ RECOVERY_OMEGA  = 0.20
 
 # Interseccion y senales
 INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin pending)
-INTERSECT_PREP_TIME = 0.5         # segundos avanzando recto antes de ejecutar el giro
+INTERSECT_PREP_TURN = 1.5         # segundos recto antes de ejecutar giro (TurnL/TurnR)
+INTERSECT_PREP_FWD  = 1.0         # segundos recto antes de ejecutar recto (AOnly/Round)
 STOP_DURATION    = 3.0
 TURN_LINEAR      = 0.07
 TURN_OMEGA_L     = +0.50
@@ -320,9 +321,11 @@ class LineFollowerCV(Node):
                 self._enter(ST_FOLLOWING)
             return
 
-        # Avanza recto INTERSECT_PREP_TIME segundos antes de ejecutar el giro
+        # Avanza recto antes de ejecutar el giro:
+        # TurnL/TurnR -> INTERSECT_PREP_TURN (1.5s), AOnly/Round -> INTERSECT_PREP_FWD (1.0s)
         if self._state == ST_INTERSECT_PREP:
-            if now - self._state_t0 >= INTERSECT_PREP_TIME:
+            prep_t = INTERSECT_PREP_TURN if self._pending in ('left', 'right') else INTERSECT_PREP_FWD
+            if now - self._state_t0 >= prep_t:
                 self.get_logger().info(
                     'Prep terminado, ejecutando: {}'.format(self._pending))
                 if self._pending == 'left':    self._enter(ST_EXEC_L)
