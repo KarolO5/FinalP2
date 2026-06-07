@@ -68,13 +68,13 @@ RECOVERY_OMEGA  = 0.20
 
 # Interseccion y senales
 INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin pending)
-INTERSECT_PREP_TURN = 1.5         # segundos recto antes de ejecutar giro (TurnL/TurnR)
-INTERSECT_PREP_FWD  = 1.0         # segundos recto antes de ejecutar recto (AOnly/Round)
+INTERSECT_PREP_TURN = 3.0         # segundos recto antes de ejecutar giro (TurnL/TurnR)
+INTERSECT_PREP_FWD  = 5.0         # segundos recto antes de ejecutar recto (AOnly/Round)
 STOP_DURATION    = 3.0
 TURN_LINEAR      = 0.0            # spin puro: rueda interior va para atras
-TURN_OMEGA_L     = +1.00
-TURN_OMEGA_R     = -0.80
-POST_TURN_TIME   = 0.6            # segundos recto despues del giro para pasar punteados
+TURN_OMEGA_L     = +0.30          # mirror exacto de TURN_OMEGA_R (misma magnitud, sentido opuesto)
+TURN_OMEGA_R     = -0.30
+POST_TURN_TIME   = 0.9            # segundos recto despues del giro para pasar punteados
 EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguidor
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
