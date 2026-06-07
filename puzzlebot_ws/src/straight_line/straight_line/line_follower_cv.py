@@ -72,8 +72,11 @@ INTERSECT_FRAMES = 12
 STOP_DURATION    = 3.0
 TURN_LINEAR      = 0.07
 TURN_OMEGA_L     = +0.50
-TURN_OMEGA_R     = -0.65   # mas agresivo para no abrir tanto la curva
+TURN_OMEGA_R     = -0.65
 EXEC_TIMEOUT     = 6.0
+# AOnly: correccion de heading durante el cruce recto.
+# Aplica KP_AHEAD * last_error para enderezar el robot si entro chueco.
+KP_AHEAD         = 0.4    # ganancia suave para no sobre-corregir
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
@@ -338,7 +341,12 @@ class LineFollowerCV(Node):
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
-                cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
+                # Correccion suave de heading: si entro chueco, se endereza
+                correction = KP_AHEAD * self._last_error
+                correction = max(-0.25, min(0.25, correction))
+                cmd = Twist()
+                cmd.linear.x  = LINEAR_VEL
+                cmd.angular.z = correction
                 self._pub_cmd.publish(cmd)
             return
 

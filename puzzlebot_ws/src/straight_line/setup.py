@@ -16,6 +16,7 @@ setup(
             'camera_node      = straight_line.camera_node:main',
             'semaforo         = straight_line.semaforo:main',
             'web_viz          = straight_line.web_viz:main',
+            'sign_detector    = straight_line.sign_detector:main',
         ],
     },
 )
