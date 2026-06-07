@@ -17,6 +17,7 @@ setup(
             'semaforo         = straight_line.semaforo:main',
             'web_viz          = straight_line.web_viz:main',
             'sign_detector    = straight_line.sign_detector:main',
+            'obstacle_stop    = straight_line.obstacle_stop:main',
         ],
     },
 )
