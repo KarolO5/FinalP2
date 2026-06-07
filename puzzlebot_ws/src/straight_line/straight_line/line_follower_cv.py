@@ -82,12 +82,10 @@ EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguid
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
 
-# Deteccion de suelo amarillo en el ROI: detiene el robot hasta que desaparezca
-YELLOW_STOP_FRAC = 0.70           # fraccion minima del ROI amarillo para detener
-# ROI amarillo: misma banda horizontal que el seguidor (ROI_TOP_FRAC),
-# un poco mas arriba para anticipar la zona amarilla
-YELLOW_ROI_TOP_FRAC = 0.70        # ligeramente por encima del ROI de linea
-# Rangos HSV amarillo (igual que semaforo.py)
+# --- Deteccion de suelo amarillo ---
+# Si >YELLOW_STOP_FRAC del ROI horizontal es amarillo, el robot se detiene
+YELLOW_STOP_FRAC    = 0.70        # fraccion minima para detener (0.0-1.0)
+YELLOW_ROI_TOP_FRAC = 0.70        # borde superior del ROI amarillo (un poco encima del ROI de linea)
 YELLOW_LO = np.array([ 18, 100,  80], dtype=np.uint8)
 YELLOW_HI = np.array([ 35, 255, 255], dtype=np.uint8)
 
@@ -240,7 +238,7 @@ class LineFollowerCV(Node):
         self._slow_sign   = False
         self._state       = ST_FOLLOWING
         self._state_t0    = 0.0
-        self._yellow_floor = False   # True cuando el ROI tiene >40% amarillo
+        self._yellow_floor = False
         # Cooldown por senal: guarda el tiempo en que se activo cada senal
         self._sign_last_t = {}   # {nombre_senal: time.monotonic()}
 
@@ -297,20 +295,18 @@ class LineFollowerCV(Node):
             self._slow_sign = True
 
     def _detect_yellow_floor(self, frame):
-        """Detecta si el ROI horizontal tiene mas de YELLOW_STOP_FRAC de amarillo."""
+        """Retorna True si >YELLOW_STOP_FRAC del ROI horizontal es amarillo."""
         h, w = frame.shape[:2]
         y0 = int(h * YELLOW_ROI_TOP_FRAC)
-        y1 = int(h * ROI_TOP_FRAC) + 10   # hasta un poco dentro del ROI de linea
+        y1 = int(h * ROI_TOP_FRAC) + 10
         x0 = int(w * ROI_LEFT_FRAC)
         x1 = int(w * ROI_RIGHT_FRAC)
         if y1 <= y0 or x1 <= x0:
             return False
         roi = frame[y0:y1, x0:x1]
-        blurred = cv2.GaussianBlur(roi, (5, 5), 0)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(cv2.GaussianBlur(roi, (5, 5), 0), cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
-        frac = float(cv2.countNonZero(mask)) / float(mask.size)
-        return frac >= YELLOW_STOP_FRAC
+        return float(cv2.countNonZero(mask)) / float(mask.size) >= YELLOW_STOP_FRAC
 
     def _image_cb(self, msg):
         try:
@@ -320,27 +316,27 @@ class LineFollowerCV(Node):
 
         error_norm, found, debug = self._detector.process(frame)
 
-        # Deteccion de suelo amarillo (solo actualiza en FOLLOWING para no interrumpir giros)
+        # Deteccion de suelo amarillo (solo en FOLLOWING / YELLOW_STOP)
         if self._state in (ST_FOLLOWING, ST_YELLOW_STOP):
-            prev_yellow = self._yellow_floor
+            prev = self._yellow_floor
             self._yellow_floor = self._detect_yellow_floor(frame)
-            if self._yellow_floor and not prev_yellow:
-                self.get_logger().info('Suelo amarillo detectado! Deteniendo robot.')
-            elif not self._yellow_floor and prev_yellow:
-                self.get_logger().info('Suelo amarillo despejado. Reanudando.')
+            if self._yellow_floor and not prev:
+                self.get_logger().info('Suelo amarillo! Deteniendo.')
+            elif not self._yellow_floor and prev:
+                self.get_logger().info('Suelo amarillo despejado.')
 
         # Dibujar ROI amarillo en debug
         h, w = frame.shape[:2]
-        y0y = int(h * YELLOW_ROI_TOP_FRAC)
-        y1y = int(h * ROI_TOP_FRAC) + 10
-        x0y = int(w * ROI_LEFT_FRAC)
-        x1y = int(w * ROI_RIGHT_FRAC)
-        ycolor = (0, 200, 255) if self._yellow_floor else (60, 120, 160)
-        cv2.rectangle(debug, (x0y, y0y), (x1y, y1y), ycolor, 2)
+        ay0 = int(h * YELLOW_ROI_TOP_FRAC)
+        ay1 = int(h * ROI_TOP_FRAC) + 10
+        ax0 = int(w * ROI_LEFT_FRAC)
+        ax1 = int(w * ROI_RIGHT_FRAC)
+        acol = (0, 200, 255) if self._yellow_floor else (60, 120, 160)
+        cv2.rectangle(debug, (ax0, ay0), (ax1, ay1), acol, 2)
         if self._yellow_floor:
-            cv2.putText(debug, 'AMARILLO STOP', (x0y, y0y - 4),
+            cv2.putText(debug, 'AMARILLO STOP', (ax0, ay0 - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
-            cv2.putText(debug, 'AMARILLO STOP', (x0y, y0y - 4),
+            cv2.putText(debug, 'AMARILLO STOP', (ax0, ay0 - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
 
         # Anotar estado en debug
@@ -376,7 +372,7 @@ class LineFollowerCV(Node):
                 self._enter(ST_FOLLOWING)
             return
 
-        # Parado por suelo amarillo: espera hasta que desaparezca el amarillo
+        # Parado por suelo amarillo
         if self._state == ST_YELLOW_STOP:
             self._pub_cmd.publish(Twist())
             if not self._yellow_floor:
@@ -384,7 +380,7 @@ class LineFollowerCV(Node):
             return
 
         # Avanza recto antes de ejecutar el giro:
-        # TurnL/TurnR -> INTERSECT_PREP_TURN (3.0s), AOnly/Round -> INTERSECT_PREP_FWD (5.0s)
+        # TurnL/TurnR -> INTERSECT_PREP_TURN (1.5s), AOnly/Round -> INTERSECT_PREP_FWD (1.0s)
         if self._state == ST_INTERSECT_PREP:
             prep_t = INTERSECT_PREP_TURN if self._pending in ('left', 'right') else INTERSECT_PREP_FWD
             if now - self._state_t0 >= prep_t:
@@ -433,7 +429,7 @@ class LineFollowerCV(Node):
 
         # FOLLOWING
         # Suelo amarillo: entrar a ST_YELLOW_STOP
-        if self._yellow_floor and self._state == ST_FOLLOWING:
+        if self._yellow_floor:
             self._enter(ST_YELLOW_STOP)
             return
 
