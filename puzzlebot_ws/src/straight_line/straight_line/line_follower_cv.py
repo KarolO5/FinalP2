@@ -344,12 +344,18 @@ class LineFollowerCV(Node):
         # FOLLOWING
         if not found:
             self._frames_lost += 1
-            if self._frames_lost >= INTERSECT_FRAMES and self._pending:
-                self.get_logger().info('Interseccion! accion: {}'.format(self._pending))
-                if self._pending == 'left':   self._enter(ST_EXEC_L)
-                elif self._pending == 'right': self._enter(ST_EXEC_R)
-                else:                          self._enter(ST_EXEC_FWD)
-                return
+            if self._pending:
+                # Con accion pendiente: ejecutar rapido (3 frames) sin recovery
+                if self._frames_lost >= 3:
+                    self.get_logger().info('Interseccion! accion: {}'.format(self._pending))
+                    if self._pending == 'left':   self._enter(ST_EXEC_L)
+                    elif self._pending == 'right': self._enter(ST_EXEC_R)
+                    else:                          self._enter(ST_EXEC_FWD)
+                return   # no hacer PID/recovery mientras esperamos
+            else:
+                # Sin accion pendiente: comportamiento original
+                if self._frames_lost >= INTERSECT_FRAMES:
+                    pass   # deja caer al PID con found=False (recovery normal)
         else:
             self._frames_lost = 0
 
