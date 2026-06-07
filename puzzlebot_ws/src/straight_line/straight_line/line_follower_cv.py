@@ -61,7 +61,8 @@ ADAPT_C     = 8
 MORPH_KSIZE = (7, 7)
 OPEN_KSIZE  = (3, 3)
 MIN_CONTOUR_AREA  = 200   # un poco mayor para ignorar punteados pequenos
-MAX_ASPECT_RATIO  = 2.5   # ancho/alto maximo: >2.5 = horizontal = junta o punteado
+MAX_ASPECT_RATIO  = 4.0   # ancho/alto maximo: >4.0 = horizontal = junta o punteado
+                          # 2.5 era muy agresivo y filtraba la linea en curvas
 
 # Recovery
 RECOVERY_FRAMES = 25
