@@ -153,7 +153,8 @@ class Handler(BaseHTTPRequestHandler):
                 while True:
                     data = buf.read()
                     self.wfile.write(
-                        b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' +
+                        b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' +
+                        str(len(data)).encode() + b'\r\n\r\n' +
                         data + b'\r\n')
                     time.sleep(0.05)   # ~20 fps
             except (BrokenPipeError, ConnectionResetError):
