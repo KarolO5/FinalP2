@@ -37,18 +37,17 @@ from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 # PARAMETROS PID
 # -----------------------------------------------------------------------
 LINEAR_VEL  = 0.09
-MAX_ANGULAR = 0.50
+MAX_ANGULAR = 0.65       # subido para girar mas rapido en curvas
 
-# PID -- KP y KD reducidos para menos oscilacion
-KP = 1.0
+KP = 0.90               # un poco menos agresivo para reducir latigazos
 KI = 0.02
 KD = 0.06
 MAX_INTEGRAL    = 0.30
 AMARILLO_FACTOR = 0.60
 SLOW_SIGN_FACTOR = 0.55
 
-# Zona muerta: errores muy pequenos se ignoran (reduce oscilacion en recta)
-ERROR_DEADBAND  = 0.05   # si |error| < 0.05 se trata como 0
+# Zona muerta mas grande: en recta ignora errores pequeños -> va mas recto
+ERROR_DEADBAND  = 0.09   # era 0.05 -> mas estabilidad en recta
 
 # ROI
 ROI_TOP_FRAC   = 0.78
