@@ -267,11 +267,11 @@ class LineFollowerCV(Node):
         self._sign        = 'ninguno'
         self._pending     = None
         self._slow_sign   = False
+        self._give_slow   = False          # CAMBIO 1: flag persistente para Give Way
         self._state       = ST_FOLLOWING
         self._state_t0    = 0.0
-        self._yellow_stop = False          # True mientras el ROI amarillo este activo
-        # Cooldown por senal: guarda el tiempo en que se activo cada senal
-        self._sign_last_t = {}   # {nombre_senal: time.monotonic()}
+        self._yellow_stop = False
+        self._sign_last_t = {}
 
         self._pub_cmd = self.create_publisher(Twist,   '/cmd_vel',          qos_be)
         self._pub_dbg = self.create_publisher(Image,   '/vision/debug_img', 10)
@@ -299,7 +299,9 @@ class LineFollowerCV(Node):
         self._sign = sign
 
         if sign == 'ninguno':
-            self._slow_sign = False
+            # CAMBIO 2: Crossing se apaga con ninguno, Give no (persiste hasta interseccion)
+            if not self._give_slow:
+                self._slow_sign = False
             return
 
         # Cooldown: ignorar la misma senal si paso hace menos de SIGN_COOLDOWN seg
@@ -322,8 +324,11 @@ class LineFollowerCV(Node):
             self._pending = 'right'; self._slow_sign = False
         elif sign in ('AOnly', 'Round'):
             self._pending = 'ahead'; self._slow_sign = False
-        elif sign in ('Crossing', 'Give'):
+        elif sign == 'Crossing':
             self._slow_sign = True
+        elif sign == 'Give':
+            self._slow_sign = True
+            self._give_slow = True   # CAMBIO 2: marcar Give como persistente
 
     def _image_cb(self, msg):
         try:
@@ -381,8 +386,6 @@ class LineFollowerCV(Node):
                 self._enter(ST_FOLLOWING)
             return
 
-        # Avanza recto antes de ejecutar el giro:
-        # TurnL/TurnR -> INTERSECT_PREP_TURN (1.5s), AOnly/Round -> INTERSECT_PREP_FWD (1.0s)
         if self._state == ST_INTERSECT_PREP:
             prep_t = INTERSECT_PREP_TURN if self._pending in ('left', 'right') else INTERSECT_PREP_FWD
             if now - self._state_t0 >= prep_t:
@@ -420,7 +423,6 @@ class LineFollowerCV(Node):
                 self._pub_cmd.publish(cmd)
             return
 
-        # Recto POST_TURN_TIME segundos tras el giro para pasar los punteados
         if self._state == ST_POST_TURN:
             if now - self._state_t0 >= POST_TURN_TIME:
                 self._enter(ST_FOLLOWING)
@@ -432,12 +434,13 @@ class LineFollowerCV(Node):
         # FOLLOWING
         if not found:
             self._frames_lost += 1
-            # Con senal pendiente: al primer frame sin linea entrar a prep recto
             if self._pending and self._frames_lost >= 1:
                 prep_t = INTERSECT_PREP_TURN if self._pending in ('left', 'right') else INTERSECT_PREP_FWD
                 self.get_logger().info(
                     'Interseccion detectada! prep recto {:.1f}s -> {}'.format(
                         prep_t, self._pending))
+                self._give_slow   = False   # CAMBIO 3: Give Way termina en interseccion
+                self._slow_sign   = False   # CAMBIO 3: recupera velocidad normal
                 self._enter(ST_INTERSECT_PREP)
                 return
         else:
@@ -460,7 +463,6 @@ class LineFollowerCV(Node):
         cmd = Twist()
         if found:
             self._frames_lost = 0
-            # Zona muerta: error muy pequeno se trata como 0 (evita oscilacion en recta)
             eff_error = 0.0 if abs(error) < ERROR_DEADBAND else error
             self._integral   += eff_error * dt
             self._integral    = max(-MAX_INTEGRAL, min(MAX_INTEGRAL, self._integral))
