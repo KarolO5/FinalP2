@@ -71,9 +71,10 @@ INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin p
 INTERSECT_PREP_TURN = 1.5         # segundos recto antes de ejecutar giro (TurnL/TurnR)
 INTERSECT_PREP_FWD  = 1.0         # segundos recto antes de ejecutar recto (AOnly/Round)
 STOP_DURATION    = 3.0
-TURN_LINEAR      = 0.07
-TURN_OMEGA_L     = +0.65
-TURN_OMEGA_R     = -0.65
+TURN_LINEAR      = 0.0            # spin puro: rueda interior va para atras
+TURN_OMEGA_L     = +1.00
+TURN_OMEGA_R     = -0.80
+POST_TURN_TIME   = 0.6            # segundos recto despues del giro para pasar punteados
 EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguidor
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
@@ -81,10 +82,11 @@ SIGN_COOLDOWN = 8.0
 
 ST_FOLLOWING      = 'following'
 ST_STOP_WAIT      = 'stop_wait'
-ST_INTERSECT_PREP = 'intersect_prep'  # avanza recto 0.5s antes de ejecutar
+ST_INTERSECT_PREP = 'intersect_prep'  # avanza recto antes de ejecutar
 ST_EXEC_L         = 'exec_left'
 ST_EXEC_R         = 'exec_right'
 ST_EXEC_FWD       = 'exec_ahead'
+ST_POST_TURN      = 'post_turn'       # avanza recto despues del giro (pasa punteados)
 
 
 # -----------------------------------------------------------------------
@@ -292,7 +294,8 @@ class LineFollowerCV(Node):
         # Anotar estado en debug
         sc = {ST_FOLLOWING:(0,255,120), ST_STOP_WAIT:(0,0,220),
               ST_INTERSECT_PREP:(0,180,255),
-              ST_EXEC_L:(255,200,0), ST_EXEC_R:(255,100,0), ST_EXEC_FWD:(0,200,255)}
+              ST_EXEC_L:(255,200,0), ST_EXEC_R:(255,100,0), ST_EXEC_FWD:(0,200,255),
+              ST_POST_TURN:(180,255,100)}
         txt = 'ST:{} SGN:{} PND:{}'.format(self._state.upper()[:4],
               self._sign[:4], self._pending or '-')
         cv2.putText(debug, txt, (8,22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
@@ -337,16 +340,16 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_L:
-            if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._pending = None; self._enter(ST_FOLLOWING)
+            if now - self._state_t0 >= EXEC_TIMEOUT:
+                self._pending = None; self._enter(ST_POST_TURN)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
                 self._pub_cmd.publish(cmd)
             return
 
         if self._state == ST_EXEC_R:
-            if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._pending = None; self._enter(ST_FOLLOWING)
+            if now - self._state_t0 >= EXEC_TIMEOUT:
+                self._pending = None; self._enter(ST_POST_TURN)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_R
                 self._pub_cmd.publish(cmd)
@@ -355,6 +358,15 @@ class LineFollowerCV(Node):
         if self._state == ST_EXEC_FWD:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
+            else:
+                cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
+                self._pub_cmd.publish(cmd)
+            return
+
+        # Recto POST_TURN_TIME segundos tras el giro para pasar los punteados
+        if self._state == ST_POST_TURN:
+            if now - self._state_t0 >= POST_TURN_TIME:
+                self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
                 self._pub_cmd.publish(cmd)
