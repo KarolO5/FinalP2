@@ -55,12 +55,12 @@ ROI_LEFT_FRAC  = 0.33
 ROI_RIGHT_FRAC = 0.67
 
 # Vision
-ADAPT_BLOCK = 31          # bloque mas grande = umbral mas suave y estable
-ADAPT_C     = 12          # mas alto = mas selectivo = menos ruido del piso
-MORPH_KSIZE = (9, 9)      # cierre mas grande = une mejor la linea
-OPEN_KSIZE  = (5, 5)      # apertura mas grande = elimina manchas mayores
-MIN_CONTOUR_AREA  = 400   # solo contornos grandes = linea real, no ruido
-MAX_ASPECT_RATIO  = 3.0
+ADAPT_BLOCK = 25
+ADAPT_C     = 8
+MORPH_KSIZE = (7, 7)
+OPEN_KSIZE  = (3, 3)
+MIN_CONTOUR_AREA  = 200   # un poco mayor para ignorar punteados pequenos
+MAX_ASPECT_RATIO  = 2.5   # ancho/alto maximo: >2.5 = horizontal = junta o punteado
 
 # Recovery
 RECOVERY_FRAMES = 25
