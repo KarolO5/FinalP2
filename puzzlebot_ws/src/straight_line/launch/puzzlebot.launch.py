@@ -27,7 +27,7 @@ def generate_launch_description():
         Node(package='rplidar_ros', executable='rplidar_composition',
              name='rplidar_node', output='screen',
              parameters=[{
-                 'serial_port':      '/dev/ttyUSB0',
+                 'serial_port':      '/dev/ttyUSB1',
                  'serial_baudrate':  115200,
                  'frame_id':         'laser',
                  'angle_compensate': True,
