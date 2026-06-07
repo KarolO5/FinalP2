@@ -82,13 +82,6 @@ EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguid
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
 
-# --- Deteccion de suelo amarillo ---
-# Si >YELLOW_STOP_FRAC del ROI horizontal es amarillo, el robot se detiene
-YELLOW_STOP_FRAC    = 0.70        # fraccion minima para detener (0.0-1.0)
-YELLOW_ROI_TOP_FRAC = 0.70        # borde superior del ROI amarillo (un poco encima del ROI de linea)
-YELLOW_LO = np.array([ 18, 100,  80], dtype=np.uint8)
-YELLOW_HI = np.array([ 35, 255, 255], dtype=np.uint8)
-
 ST_FOLLOWING      = 'following'
 ST_STOP_WAIT      = 'stop_wait'
 ST_INTERSECT_PREP = 'intersect_prep'  # avanza recto antes de ejecutar
@@ -96,7 +89,6 @@ ST_EXEC_L         = 'exec_left'
 ST_EXEC_R         = 'exec_right'
 ST_EXEC_FWD       = 'exec_ahead'
 ST_POST_TURN      = 'post_turn'       # avanza recto despues del giro (pasa punteados)
-ST_YELLOW_STOP    = 'yellow_stop'     # parado por suelo amarillo en ROI
 
 
 # -----------------------------------------------------------------------
@@ -238,7 +230,6 @@ class LineFollowerCV(Node):
         self._slow_sign   = False
         self._state       = ST_FOLLOWING
         self._state_t0    = 0.0
-        self._yellow_floor = False
         # Cooldown por senal: guarda el tiempo en que se activo cada senal
         self._sign_last_t = {}   # {nombre_senal: time.monotonic()}
 
@@ -294,20 +285,6 @@ class LineFollowerCV(Node):
         elif sign in ('Crossing', 'Give'):
             self._slow_sign = True
 
-    def _detect_yellow_floor(self, frame):
-        """Retorna True si >YELLOW_STOP_FRAC del ROI horizontal es amarillo."""
-        h, w = frame.shape[:2]
-        y0 = int(h * YELLOW_ROI_TOP_FRAC)
-        y1 = int(h * ROI_TOP_FRAC) + 10
-        x0 = int(w * ROI_LEFT_FRAC)
-        x1 = int(w * ROI_RIGHT_FRAC)
-        if y1 <= y0 or x1 <= x0:
-            return False
-        roi = frame[y0:y1, x0:x1]
-        hsv = cv2.cvtColor(cv2.GaussianBlur(roi, (5, 5), 0), cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
-        return float(cv2.countNonZero(mask)) / float(mask.size) >= YELLOW_STOP_FRAC
-
     def _image_cb(self, msg):
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -316,34 +293,11 @@ class LineFollowerCV(Node):
 
         error_norm, found, debug = self._detector.process(frame)
 
-        # Deteccion de suelo amarillo (solo en FOLLOWING / YELLOW_STOP)
-        if self._state in (ST_FOLLOWING, ST_YELLOW_STOP):
-            prev = self._yellow_floor
-            self._yellow_floor = self._detect_yellow_floor(frame)
-            if self._yellow_floor and not prev:
-                self.get_logger().info('Suelo amarillo! Deteniendo.')
-            elif not self._yellow_floor and prev:
-                self.get_logger().info('Suelo amarillo despejado.')
-
-        # Dibujar ROI amarillo en debug
-        h, w = frame.shape[:2]
-        ay0 = int(h * YELLOW_ROI_TOP_FRAC)
-        ay1 = int(h * ROI_TOP_FRAC) + 10
-        ax0 = int(w * ROI_LEFT_FRAC)
-        ax1 = int(w * ROI_RIGHT_FRAC)
-        acol = (0, 200, 255) if self._yellow_floor else (60, 120, 160)
-        cv2.rectangle(debug, (ax0, ay0), (ax1, ay1), acol, 2)
-        if self._yellow_floor:
-            cv2.putText(debug, 'AMARILLO STOP', (ax0, ay0 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
-            cv2.putText(debug, 'AMARILLO STOP', (ax0, ay0 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
-
         # Anotar estado en debug
         sc = {ST_FOLLOWING:(0,255,120), ST_STOP_WAIT:(0,0,220),
               ST_INTERSECT_PREP:(0,180,255),
               ST_EXEC_L:(255,200,0), ST_EXEC_R:(255,100,0), ST_EXEC_FWD:(0,200,255),
-              ST_POST_TURN:(180,255,100), ST_YELLOW_STOP:(0,200,255)}
+              ST_POST_TURN:(180,255,100)}
         txt = 'ST:{} SGN:{} PND:{}'.format(self._state.upper()[:4],
               self._sign[:4], self._pending or '-')
         cv2.putText(debug, txt, (8,22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
@@ -369,13 +323,6 @@ class LineFollowerCV(Node):
         if self._state == ST_STOP_WAIT:
             self._pub_cmd.publish(Twist())
             if now - self._state_t0 >= STOP_DURATION:
-                self._enter(ST_FOLLOWING)
-            return
-
-        # Parado por suelo amarillo
-        if self._state == ST_YELLOW_STOP:
-            self._pub_cmd.publish(Twist())
-            if not self._yellow_floor:
                 self._enter(ST_FOLLOWING)
             return
 
@@ -428,11 +375,6 @@ class LineFollowerCV(Node):
             return
 
         # FOLLOWING
-        # Suelo amarillo: entrar a ST_YELLOW_STOP
-        if self._yellow_floor:
-            self._enter(ST_YELLOW_STOP)
-            return
-
         if not found:
             self._frames_lost += 1
             # Con senal pendiente: al primer frame sin linea entrar a prep recto
