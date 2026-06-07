@@ -6,9 +6,8 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 ROBOT_IP=$(hostname -I | awk '{print $1}')
 
-echo "=== Iniciando micro_ros_agent ==="
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200 &
-sleep 3
+# micro_ros_agent se corre manualmente desde otro SSH:
+# ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
 
 echo "=== Iniciando odometria ==="
 ros2 run straight_line odometry &
@@ -33,4 +32,4 @@ sleep 1
 echo "=== Iniciando seguidor de linea ==="
 ros2 run straight_line line_follower_cv
 
-kill %1 %2 %3 %4 %5 %6
+kill %1 %2 %3 %4 %5
