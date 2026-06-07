@@ -7,7 +7,7 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ROBOT_IP=$(hostname -I | awk '{print $1}')
 
 # micro_ros_agent se corre manualmente desde otro SSH:
-# ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+# ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/hackerboard -b 115200
 
 echo "=== Iniciando odometria ==="
 ros2 run straight_line odometry &
@@ -32,7 +32,7 @@ sleep 1
 echo "=== Iniciando RPLiDAR A1 ==="
 ros2 run rplidar_ros rplidar_composition \
     --ros-args \
-    -p serial_port:=/dev/ttyUSB1 \
+    -p serial_port:=/dev/rplidar \
     -p serial_baudrate:=115200 \
     -p frame_id:=laser \
     -p angle_compensate:=true \
