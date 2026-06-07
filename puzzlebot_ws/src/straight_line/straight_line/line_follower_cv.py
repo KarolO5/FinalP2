@@ -83,7 +83,7 @@ EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguid
 SIGN_COOLDOWN = 8.0
 
 # Deteccion de suelo amarillo en el ROI: detiene el robot hasta que desaparezca
-YELLOW_STOP_FRAC = 0.40           # fraccion minima del ROI amarillo para detener
+YELLOW_STOP_FRAC = 0.70           # fraccion minima del ROI amarillo para detener
 # ROI amarillo: misma banda horizontal que el seguidor (ROI_TOP_FRAC),
 # un poco mas arriba para anticipar la zona amarilla
 YELLOW_ROI_TOP_FRAC = 0.70        # ligeramente por encima del ROI de linea
