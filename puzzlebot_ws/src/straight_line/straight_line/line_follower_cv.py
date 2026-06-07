@@ -60,10 +60,8 @@ ADAPT_BLOCK = 25
 ADAPT_C     = 8
 MORPH_KSIZE = (7, 7)
 OPEN_KSIZE  = (3, 3)
-MIN_CONTOUR_AREA  = 200
-MAX_ASPECT_RATIO  = 4.0   # ancho/alto maximo del bounding rect
-MIN_RECT_HEIGHT   = 20    # altura minima del bounding rect en pixeles
-                          # un punto del punteado mide ~8-15px, la linea real >20px
+MIN_CONTOUR_AREA  = 200   # un poco mayor para ignorar punteados pequenos
+MAX_ASPECT_RATIO  = 2.5   # ancho/alto maximo: >2.5 = horizontal = junta o punteado
 
 # Recovery
 RECOVERY_FRAMES = 25
@@ -74,20 +72,14 @@ INTERSECT_FRAMES = 12
 STOP_DURATION    = 3.0
 TURN_LINEAR      = 0.07
 TURN_OMEGA_L     = +0.50
-TURN_OMEGA_R     = -0.65
+TURN_OMEGA_R     = -0.65   # mas agresivo para no abrir tanto la curva
 EXEC_TIMEOUT     = 6.0
-EXEC_MIN_TIME    = 1.8    # tiempo MINIMO ejecutando antes de que found=True termine
-                          # evita salir por la linea punteada del otro lado
-KP_AHEAD         = 0.4
-ALIGN_DURATION   = 0.5    # segundos de correccion de heading antes de ejecutar
-ALIGN_KP         = 0.5
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
 
 ST_FOLLOWING = 'following'
 ST_STOP_WAIT = 'stop_wait'
-ST_ALIGN     = 'align'      # correccion de heading antes de ejecutar
 ST_EXEC_L    = 'exec_left'
 ST_EXEC_R    = 'exec_right'
 ST_EXEC_FWD  = 'exec_ahead'
@@ -108,13 +100,10 @@ class ContourLineDetector:
         for cnt in contours:
             if cv2.contourArea(cnt) < MIN_CONTOUR_AREA:
                 continue
-            # Filtro geometrico: rechazar contornos de juntas y punteados
+            # Filtro de aspecto: rechazar contornos muy horizontales
+            # (juntas de piezas de pista y linea punteada son mas anchos que altos)
             bx, by, bw, bh = cv2.boundingRect(cnt)
-            if bh == 0:
-                continue
-            if bw / float(bh) > MAX_ASPECT_RATIO:   # demasiado horizontal
-                continue
-            if bh < MIN_RECT_HEIGHT:                  # demasiado bajo = punto del punteado
+            if bh == 0 or bw / float(bh) > MAX_ASPECT_RATIO:
                 continue
             M = cv2.moments(cnt)
             if M['m00'] == 0:
@@ -329,27 +318,8 @@ class LineFollowerCV(Node):
                 self._enter(ST_FOLLOWING)
             return
 
-        # Alineacion previa: corrige heading antes de ejecutar la maniobra
-        if self._state == ST_ALIGN:
-            if now - self._state_t0 >= ALIGN_DURATION:
-                # Termino la alineacion, ejecutar la maniobra pendiente
-                if self._pending == 'left':   self._enter(ST_EXEC_L)
-                elif self._pending == 'right': self._enter(ST_EXEC_R)
-                else:                          self._enter(ST_EXEC_FWD)
-            else:
-                # Parar y corregir heading usando el error de cuando perdio la linea
-                correction = ALIGN_KP * self._last_error
-                correction = max(-0.30, min(0.30, correction))
-                cmd = Twist()
-                cmd.linear.x  = 0.0       # no avanza durante la alineacion
-                cmd.angular.z = correction
-                self._pub_cmd.publish(cmd)
-            return
-
         if self._state == ST_EXEC_L:
-            elapsed = now - self._state_t0
-            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
-            if done:
+            if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
@@ -357,9 +327,7 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_R:
-            elapsed = now - self._state_t0
-            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
-            if done:
+            if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_R
@@ -367,16 +335,10 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_FWD:
-            elapsed = now - self._state_t0
-            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
-            if done:
+            if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
-                correction = KP_AHEAD * self._last_error
-                correction = max(-0.25, min(0.25, correction))
-                cmd = Twist()
-                cmd.linear.x  = LINEAR_VEL
-                cmd.angular.z = correction
+                cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
                 self._pub_cmd.publish(cmd)
             return
 
@@ -384,8 +346,10 @@ class LineFollowerCV(Node):
         if not found:
             self._frames_lost += 1
             if self._frames_lost >= INTERSECT_FRAMES and self._pending:
-                self.get_logger().info('Interseccion! alineando antes de: {}'.format(self._pending))
-                self._enter(ST_ALIGN)   # primero alinea, luego ejecuta
+                self.get_logger().info('Interseccion! accion: {}'.format(self._pending))
+                if self._pending == 'left':   self._enter(ST_EXEC_L)
+                elif self._pending == 'right': self._enter(ST_EXEC_R)
+                else:                          self._enter(ST_EXEC_FWD)
                 return
         else:
             self._frames_lost = 0
