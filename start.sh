@@ -30,16 +30,13 @@ ros2 run straight_line web_viz &
 sleep 1
 
 echo "=== Iniciando RPLiDAR A1 ==="
-LIDAR_WS=$(find ~/ -maxdepth 4 -name "setup.bash" -path "*/install/setup.bash" \
-    2>/dev/null | xargs grep -l "rplidar_ros" 2>/dev/null | head -1)
-([ -n "$LIDAR_WS" ] && source "$LIDAR_WS"; \
- ros2 run rplidar_ros rplidar_composition \
+ros2 run rplidar_ros rplidar_composition \
     --ros-args \
     -p serial_port:=/dev/ttyUSB1 \
     -p serial_baudrate:=115200 \
     -p frame_id:=laser \
     -p angle_compensate:=true \
-    -p scan_mode:=Standard) &
+    -p scan_mode:=Standard &
 sleep 2
 
 echo "=== Iniciando obstacle_stop ==="

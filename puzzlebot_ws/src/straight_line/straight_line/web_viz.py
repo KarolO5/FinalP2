@@ -109,10 +109,7 @@ class FrameBuffer:
         self._placeholder = buf.tobytes() if ok else b''
 
     def update(self, frame: np.ndarray):
-        h, w = frame.shape[:2]
-        if w > 320:
-            frame = cv2.resize(frame, (320, int(h * 320 / w)))
-        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 55])
+        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if ok:
             with self._lock:
                 self._data = buf.tobytes()
@@ -159,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
                         b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' +
                         str(len(data)).encode() + b'\r\n\r\n' +
                         data + b'\r\n')
-                    time.sleep(0.10)   # ~10 fps
+                    time.sleep(0.05)   # ~20 fps
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
