@@ -30,7 +30,10 @@ ros2 run straight_line web_viz &
 sleep 1
 
 echo "=== Iniciando RPLiDAR A1 ==="
-(source ~/ros2_ws/install/setup.bash && ros2 run rplidar_ros rplidar_composition \
+LIDAR_WS=$(find ~/ -maxdepth 4 -name "setup.bash" -path "*/install/setup.bash" \
+    2>/dev/null | xargs grep -l "rplidar_ros" 2>/dev/null | head -1)
+([ -n "$LIDAR_WS" ] && source "$LIDAR_WS"; \
+ ros2 run rplidar_ros rplidar_composition \
     --ros-args \
     -p serial_port:=/dev/ttyUSB1 \
     -p serial_baudrate:=115200 \
