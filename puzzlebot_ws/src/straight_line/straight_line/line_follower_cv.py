@@ -51,8 +51,8 @@ ERROR_DEADBAND  = 0.09   # era 0.05 -> mas estabilidad en recta
 
 # ROI
 ROI_TOP_FRAC   = 0.78
-ROI_LEFT_FRAC  = 0.33
-ROI_RIGHT_FRAC = 0.67
+ROI_LEFT_FRAC  = 0.25
+ROI_RIGHT_FRAC = 0.68
 
 # Vision
 ADAPT_BLOCK = 25
@@ -72,9 +72,9 @@ INTERSECT_PREP_TURN = 1.5         # segundos recto antes de ejecutar giro (TurnL
 INTERSECT_PREP_FWD  = 1.0         # segundos recto antes de ejecutar recto (AOnly/Round)
 STOP_DURATION    = 3.0
 TURN_LINEAR      = 0.07
-TURN_OMEGA_L     = +0.50
-TURN_OMEGA_R     = -0.65   # mas agresivo para no abrir tanto la curva
-EXEC_TIMEOUT     = 3.0            # segundos ejecutando el giro ignorando seguidor
+TURN_OMEGA_L     = +0.65
+TURN_OMEGA_R     = -0.65
+EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguidor
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
