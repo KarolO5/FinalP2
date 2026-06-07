@@ -67,23 +67,23 @@ RECOVERY_FRAMES = 25
 RECOVERY_OMEGA  = 0.20
 
 # Interseccion y senales
-INTERSECT_FRAMES      = 20        # fallback: frames sin linea (solo si no hay pending)
-INTERSECT_BLANK_THRESH = 0.04     # <4% ROI con pixeles = interseccion abierta (piso blanco)
-INTERSECT_BLANK_FRAMES = 3        # frames consecutivos blancos para confirmar interseccion
+INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin pending)
+INTERSECT_PREP_TIME = 0.5         # segundos avanzando recto antes de ejecutar el giro
 STOP_DURATION    = 3.0
 TURN_LINEAR      = 0.07
 TURN_OMEGA_L     = +0.50
 TURN_OMEGA_R     = -0.65   # mas agresivo para no abrir tanto la curva
-EXEC_TIMEOUT     = 6.0
+EXEC_TIMEOUT     = 3.0            # segundos ejecutando el giro ignorando seguidor
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
 
-ST_FOLLOWING = 'following'
-ST_STOP_WAIT = 'stop_wait'
-ST_EXEC_L    = 'exec_left'
-ST_EXEC_R    = 'exec_right'
-ST_EXEC_FWD  = 'exec_ahead'
+ST_FOLLOWING      = 'following'
+ST_STOP_WAIT      = 'stop_wait'
+ST_INTERSECT_PREP = 'intersect_prep'  # avanza recto 0.5s antes de ejecutar
+ST_EXEC_L         = 'exec_left'
+ST_EXEC_R         = 'exec_right'
+ST_EXEC_FWD       = 'exec_ahead'
 
 
 # -----------------------------------------------------------------------
@@ -198,10 +198,7 @@ class ContourLineDetector:
             cv2.rectangle(debug,(x0t,y0t),(x0t+tw2,y0t+th2),(150,150,150),1)
             cv2.putText(debug,'MASK',(x0t+3,y0t+14),cv2.FONT_HERSHEY_SIMPLEX,0.4,(200,200,200),1)
 
-        # Fraccion del ROI que tiene pixeles de linea (0.0 = vacio, 1.0 = lleno)
-        mask_fill = float(np.count_nonzero(mask)) / float(roi_w * roi_h)
-
-        return error_norm, found, debug, mask_fill
+        return error_norm, found, debug
 
 
 # -----------------------------------------------------------------------
@@ -230,8 +227,6 @@ class LineFollowerCV(Node):
         self._state_t0    = 0.0
         # Cooldown por senal: guarda el tiempo en que se activo cada senal
         self._sign_last_t = {}   # {nombre_senal: time.monotonic()}
-
-        self._blank_frames = 0   # frames consecutivos con ROI vacio (para deteccion de interseccion)
 
         self._pub_cmd = self.create_publisher(Twist,   '/cmd_vel',          qos_be)
         self._pub_dbg = self.create_publisher(Image,   '/vision/debug_img', 10)
@@ -291,13 +286,14 @@ class LineFollowerCV(Node):
         except Exception as e:
             self.get_logger().warn('cv_bridge: {}'.format(e)); return
 
-        error_norm, found, debug, mask_fill = self._detector.process(frame)
+        error_norm, found, debug = self._detector.process(frame)
 
         # Anotar estado en debug
         sc = {ST_FOLLOWING:(0,255,120), ST_STOP_WAIT:(0,0,220),
+              ST_INTERSECT_PREP:(0,180,255),
               ST_EXEC_L:(255,200,0), ST_EXEC_R:(255,100,0), ST_EXEC_FWD:(0,200,255)}
-        txt = 'ST:{} SGN:{} PND:{} BLK:{:.2f}'.format(self._state.upper()[:4],
-              self._sign[:4], self._pending or '-', mask_fill)
+        txt = 'ST:{} SGN:{} PND:{}'.format(self._state.upper()[:4],
+              self._sign[:4], self._pending or '-')
         cv2.putText(debug, txt, (8,22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
         cv2.putText(debug, txt, (8,22), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     sc.get(self._state,(200,200,200)), 1)
@@ -309,13 +305,13 @@ class LineFollowerCV(Node):
         err_msg = Float32(); err_msg.data = float(error_norm)
         self._pub_err.publish(err_msg)
 
-        self._run(error_norm, found, mask_fill)
+        self._run(error_norm, found)
 
     def _enter(self, state):
         self._state = state; self._state_t0 = time.monotonic()
         self.get_logger().info('Estado: {}'.format(state))
 
-    def _run(self, error, found, mask_fill):
+    def _run(self, error, found):
         now = time.monotonic()
 
         if self._state == ST_STOP_WAIT:
@@ -324,9 +320,22 @@ class LineFollowerCV(Node):
                 self._enter(ST_FOLLOWING)
             return
 
+        # Avanza recto INTERSECT_PREP_TIME segundos antes de ejecutar el giro
+        if self._state == ST_INTERSECT_PREP:
+            if now - self._state_t0 >= INTERSECT_PREP_TIME:
+                self.get_logger().info(
+                    'Prep terminado, ejecutando: {}'.format(self._pending))
+                if self._pending == 'left':    self._enter(ST_EXEC_L)
+                elif self._pending == 'right': self._enter(ST_EXEC_R)
+                else:                          self._enter(ST_EXEC_FWD)
+            else:
+                cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
+                self._pub_cmd.publish(cmd)
+            return
+
         if self._state == ST_EXEC_L:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._blank_frames = 0; self._pending = None; self._enter(ST_FOLLOWING)
+                self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
                 self._pub_cmd.publish(cmd)
@@ -334,7 +343,7 @@ class LineFollowerCV(Node):
 
         if self._state == ST_EXEC_R:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._blank_frames = 0; self._pending = None; self._enter(ST_FOLLOWING)
+                self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_R
                 self._pub_cmd.publish(cmd)
@@ -342,7 +351,7 @@ class LineFollowerCV(Node):
 
         if self._state == ST_EXEC_FWD:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._blank_frames = 0; self._pending = None; self._enter(ST_FOLLOWING)
+                self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
                 self._pub_cmd.publish(cmd)
@@ -351,36 +360,15 @@ class LineFollowerCV(Node):
         # FOLLOWING
         if not found:
             self._frames_lost += 1
+            # Con senal pendiente: al primer frame sin linea entrar a prep recto
+            if self._pending and self._frames_lost >= 1:
+                self.get_logger().info(
+                    'Interseccion detectada! prep recto {:.1f}s -> {}'.format(
+                        INTERSECT_PREP_TIME, self._pending))
+                self._enter(ST_INTERSECT_PREP)
+                return
         else:
             self._frames_lost = 0
-
-        # --- Deteccion de interseccion por ROI vacio ---
-        # Cuando hay una senal pendiente, esperar a que el ROI quede casi en blanco
-        # (mask_fill muy bajo = piso sin linea = interseccion real).
-        # Esto evita reaccionar a los punteados antes de la interseccion.
-        if self._pending:
-            if mask_fill < INTERSECT_BLANK_THRESH:
-                self._blank_frames += 1
-                if self._blank_frames >= INTERSECT_BLANK_FRAMES:
-                    self.get_logger().info(
-                        'Interseccion! fill={:.3f} accion: {}'.format(mask_fill, self._pending))
-                    self._blank_frames = 0
-                    if self._pending == 'left':    self._enter(ST_EXEC_L)
-                    elif self._pending == 'right': self._enter(ST_EXEC_R)
-                    else:                          self._enter(ST_EXEC_FWD)
-                    return
-            else:
-                self._blank_frames = 0
-
-            # Fallback: si se pierde la linea por muchos frames (sin pending blanco)
-            if self._frames_lost >= INTERSECT_FRAMES:
-                self.get_logger().info(
-                    'Interseccion fallback (frames)! accion: {}'.format(self._pending))
-                self._blank_frames = 0
-                if self._pending == 'left':    self._enter(ST_EXEC_L)
-                elif self._pending == 'right': self._enter(ST_EXEC_R)
-                else:                          self._enter(ST_EXEC_FWD)
-                return
 
         self._pid(error, found)
 
