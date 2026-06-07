@@ -71,9 +71,12 @@ INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin p
 INTERSECT_PREP_TURN = 3.0         # segundos recto antes de ejecutar giro (TurnL/TurnR)
 INTERSECT_PREP_FWD  = 5.0         # segundos recto antes de ejecutar recto (AOnly/Round)
 STOP_DURATION    = 3.0
-TURN_LINEAR      = 0.0            # spin puro: rueda interior va para atras
-TURN_OMEGA_L     = +0.30          # mirror exacto de TURN_OMEGA_R (misma magnitud, sentido opuesto)
-TURN_OMEGA_R     = -0.30
+TURN_LINEAR      = 0.0            # spin puro giro derecha: rueda interior va para atras
+TURN_OMEGA_R     = -0.30          # angular.z giro derecha
+# Giro izquierda: mirror exacto -> linear=TURN_OMEGA_L1, angular=TURN_OMEGA_R1
+TURN_OMEGA_L1    = -0.30          # linear.x giro izquierda  (mismo valor que TURN_OMEGA_R)
+TURN_OMEGA_R1    = +0.60          # angular.z giro izquierda
+TURN_OMEGA_L     = +0.60          # (referencia: angular.z si se usara TURN_LINEAR para giro izq)
 POST_TURN_TIME   = 0.9            # segundos recto despues del giro para pasar punteados
 EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguidor
 
@@ -343,7 +346,7 @@ class LineFollowerCV(Node):
             if now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_POST_TURN)
             else:
-                cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
+                cmd = Twist(); cmd.linear.x = TURN_OMEGA_L1; cmd.angular.z = TURN_OMEGA_R1
                 self._pub_cmd.publish(cmd)
             return
 
