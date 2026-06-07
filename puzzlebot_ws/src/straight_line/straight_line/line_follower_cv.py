@@ -365,9 +365,10 @@ class LineFollowerCV(Node):
             self._frames_lost += 1
             # Con senal pendiente: al primer frame sin linea entrar a prep recto
             if self._pending and self._frames_lost >= 1:
+                prep_t = INTERSECT_PREP_TURN if self._pending in ('left', 'right') else INTERSECT_PREP_FWD
                 self.get_logger().info(
                     'Interseccion detectada! prep recto {:.1f}s -> {}'.format(
-                        INTERSECT_PREP_TIME, self._pending))
+                        prep_t, self._pending))
                 self._enter(ST_INTERSECT_PREP)
                 return
         else:
