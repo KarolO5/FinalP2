@@ -1,7 +1,6 @@
 #!/bin/bash
 source /opt/ros/jazzy/setup.bash
 source ~/uros_ws/install/setup.bash
-source ~/ros2_ws/install/setup.bash
 source ~/FinalP2/puzzlebot_ws/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
@@ -31,13 +30,13 @@ ros2 run straight_line web_viz &
 sleep 1
 
 echo "=== Iniciando RPLiDAR A1 ==="
-ros2 run rplidar_ros rplidar_composition \
+(source ~/ros2_ws/install/setup.bash && ros2 run rplidar_ros rplidar_composition \
     --ros-args \
     -p serial_port:=/dev/ttyUSB1 \
     -p serial_baudrate:=115200 \
     -p frame_id:=laser \
     -p angle_compensate:=true \
-    -p scan_mode:=Standard &
+    -p scan_mode:=Standard) &
 sleep 2
 
 echo "=== Iniciando obstacle_stop ==="

@@ -19,6 +19,8 @@ class ObstacleStop(Node):
 
         self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
         self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Timer a 20 Hz: mientras hay obstáculo pisa cualquier cmd_vel del line follower
+        self.create_timer(0.05, self._timer_cb)
 
         self.get_logger().info(
             'obstacle_stop listo | d<{:.2f}m en +-{}°'.format(
@@ -45,9 +47,12 @@ class ObstacleStop(Node):
             self._obstaculo = hay_obstaculo
             if hay_obstaculo:
                 self.get_logger().warn('OBSTACULO! Frenando.')
-                self._cmd_pub.publish(Twist())
             else:
                 self.get_logger().info('Camino libre.')
+
+    def _timer_cb(self):
+        if self._obstaculo:
+            self._cmd_pub.publish(Twist())
 
 
 def main(args=None):
