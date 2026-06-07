@@ -71,17 +71,25 @@ INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin p
 INTERSECT_PREP_TURN = 3.0         # segundos recto antes de ejecutar giro (TurnL/TurnR)
 INTERSECT_PREP_FWD  = 5.0         # segundos recto antes de ejecutar recto (AOnly/Round)
 STOP_DURATION    = 3.0
-TURN_LINEAR      = 0.0            # spin puro giro derecha: rueda interior va para atras
-TURN_OMEGA_R     = -0.30          # angular.z giro derecha
-# Giro izquierda: mirror exacto -> linear=TURN_OMEGA_L1, angular=TURN_OMEGA_R1
-TURN_OMEGA_L1    = -0.30          # linear.x giro izquierda  (mismo valor que TURN_OMEGA_R)
-TURN_OMEGA_R1    = +0.60          # angular.z giro izquierda
-TURN_OMEGA_L     = +0.60          # (referencia: angular.z si se usara TURN_LINEAR para giro izq)
-POST_TURN_TIME   = 0.9            # segundos recto despues del giro para pasar punteados
+TURN_LINEAR      = 0.0            # spin puro: rueda interior va para atras
+TURN_OMEGA_L     = +0.60
+TURN_OMEGA_R     = -0.30
+TURN_OMEGA_L1     = -0.30
+TURN_OMEGA_R1     = +0.60
+POST_TURN_TIME   = 0.9          # segundos recto despues del giro para pasar punteados
 EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguidor
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
+
+# Deteccion de suelo amarillo en el ROI: detiene el robot hasta que desaparezca
+YELLOW_STOP_FRAC = 0.40           # fraccion minima del ROI amarillo para detener
+# ROI amarillo: misma banda horizontal que el seguidor (ROI_TOP_FRAC),
+# un poco mas arriba para anticipar la zona amarilla
+YELLOW_ROI_TOP_FRAC = 0.70        # ligeramente por encima del ROI de linea
+# Rangos HSV amarillo (igual que semaforo.py)
+YELLOW_LO = np.array([ 18, 100,  80], dtype=np.uint8)
+YELLOW_HI = np.array([ 35, 255, 255], dtype=np.uint8)
 
 ST_FOLLOWING      = 'following'
 ST_STOP_WAIT      = 'stop_wait'
@@ -90,6 +98,7 @@ ST_EXEC_L         = 'exec_left'
 ST_EXEC_R         = 'exec_right'
 ST_EXEC_FWD       = 'exec_ahead'
 ST_POST_TURN      = 'post_turn'       # avanza recto despues del giro (pasa punteados)
+ST_YELLOW_STOP    = 'yellow_stop'     # parado por suelo amarillo en ROI
 
 
 # -----------------------------------------------------------------------
@@ -231,6 +240,7 @@ class LineFollowerCV(Node):
         self._slow_sign   = False
         self._state       = ST_FOLLOWING
         self._state_t0    = 0.0
+        self._yellow_floor = False   # True cuando el ROI tiene >40% amarillo
         # Cooldown por senal: guarda el tiempo en que se activo cada senal
         self._sign_last_t = {}   # {nombre_senal: time.monotonic()}
 
@@ -286,6 +296,22 @@ class LineFollowerCV(Node):
         elif sign in ('Crossing', 'Give'):
             self._slow_sign = True
 
+    def _detect_yellow_floor(self, frame):
+        """Detecta si el ROI horizontal tiene mas de YELLOW_STOP_FRAC de amarillo."""
+        h, w = frame.shape[:2]
+        y0 = int(h * YELLOW_ROI_TOP_FRAC)
+        y1 = int(h * ROI_TOP_FRAC) + 10   # hasta un poco dentro del ROI de linea
+        x0 = int(w * ROI_LEFT_FRAC)
+        x1 = int(w * ROI_RIGHT_FRAC)
+        if y1 <= y0 or x1 <= x0:
+            return False
+        roi = frame[y0:y1, x0:x1]
+        blurred = cv2.GaussianBlur(roi, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
+        frac = float(cv2.countNonZero(mask)) / float(mask.size)
+        return frac >= YELLOW_STOP_FRAC
+
     def _image_cb(self, msg):
         try:
             frame = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -294,11 +320,34 @@ class LineFollowerCV(Node):
 
         error_norm, found, debug = self._detector.process(frame)
 
+        # Deteccion de suelo amarillo (solo actualiza en FOLLOWING para no interrumpir giros)
+        if self._state in (ST_FOLLOWING, ST_YELLOW_STOP):
+            prev_yellow = self._yellow_floor
+            self._yellow_floor = self._detect_yellow_floor(frame)
+            if self._yellow_floor and not prev_yellow:
+                self.get_logger().info('Suelo amarillo detectado! Deteniendo robot.')
+            elif not self._yellow_floor and prev_yellow:
+                self.get_logger().info('Suelo amarillo despejado. Reanudando.')
+
+        # Dibujar ROI amarillo en debug
+        h, w = frame.shape[:2]
+        y0y = int(h * YELLOW_ROI_TOP_FRAC)
+        y1y = int(h * ROI_TOP_FRAC) + 10
+        x0y = int(w * ROI_LEFT_FRAC)
+        x1y = int(w * ROI_RIGHT_FRAC)
+        ycolor = (0, 200, 255) if self._yellow_floor else (60, 120, 160)
+        cv2.rectangle(debug, (x0y, y0y), (x1y, y1y), ycolor, 2)
+        if self._yellow_floor:
+            cv2.putText(debug, 'AMARILLO STOP', (x0y, y0y - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
+            cv2.putText(debug, 'AMARILLO STOP', (x0y, y0y - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+
         # Anotar estado en debug
         sc = {ST_FOLLOWING:(0,255,120), ST_STOP_WAIT:(0,0,220),
               ST_INTERSECT_PREP:(0,180,255),
               ST_EXEC_L:(255,200,0), ST_EXEC_R:(255,100,0), ST_EXEC_FWD:(0,200,255),
-              ST_POST_TURN:(180,255,100)}
+              ST_POST_TURN:(180,255,100), ST_YELLOW_STOP:(0,200,255)}
         txt = 'ST:{} SGN:{} PND:{}'.format(self._state.upper()[:4],
               self._sign[:4], self._pending or '-')
         cv2.putText(debug, txt, (8,22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
@@ -327,8 +376,15 @@ class LineFollowerCV(Node):
                 self._enter(ST_FOLLOWING)
             return
 
+        # Parado por suelo amarillo: espera hasta que desaparezca el amarillo
+        if self._state == ST_YELLOW_STOP:
+            self._pub_cmd.publish(Twist())
+            if not self._yellow_floor:
+                self._enter(ST_FOLLOWING)
+            return
+
         # Avanza recto antes de ejecutar el giro:
-        # TurnL/TurnR -> INTERSECT_PREP_TURN (1.5s), AOnly/Round -> INTERSECT_PREP_FWD (1.0s)
+        # TurnL/TurnR -> INTERSECT_PREP_TURN (3.0s), AOnly/Round -> INTERSECT_PREP_FWD (5.0s)
         if self._state == ST_INTERSECT_PREP:
             prep_t = INTERSECT_PREP_TURN if self._pending in ('left', 'right') else INTERSECT_PREP_FWD
             if now - self._state_t0 >= prep_t:
@@ -346,7 +402,7 @@ class LineFollowerCV(Node):
             if now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_POST_TURN)
             else:
-                cmd = Twist(); cmd.linear.x = TURN_OMEGA_L1; cmd.angular.z = TURN_OMEGA_R1
+                cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = -TURN_OMEGA_R
                 self._pub_cmd.publish(cmd)
             return
 
@@ -376,6 +432,11 @@ class LineFollowerCV(Node):
             return
 
         # FOLLOWING
+        # Suelo amarillo: entrar a ST_YELLOW_STOP
+        if self._yellow_floor and self._state == ST_FOLLOWING:
+            self._enter(ST_YELLOW_STOP)
+            return
+
         if not found:
             self._frames_lost += 1
             # Con senal pendiente: al primer frame sin linea entrar a prep recto
