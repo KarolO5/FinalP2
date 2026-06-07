@@ -350,11 +350,6 @@ class LineFollowerCV(Node):
                 elif self._pending == 'right': self._enter(ST_EXEC_R)
                 else:                          self._enter(ST_EXEC_FWD)
                 return
-            # Hay accion pendiente: parar en vez de hacer recovery
-            # (el recovery gira y puede encontrar la linea lateral)
-            if self._pending:
-                self._pub_cmd.publish(Twist())
-                return
         else:
             self._frames_lost = 0
 
