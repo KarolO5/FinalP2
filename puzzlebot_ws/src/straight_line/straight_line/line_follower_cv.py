@@ -76,12 +76,11 @@ TURN_LINEAR      = 0.07
 TURN_OMEGA_L     = +0.50
 TURN_OMEGA_R     = -0.65
 EXEC_TIMEOUT     = 6.0
-KP_AHEAD         = 0.4    # correccion de heading en EXEC_FWD
-# Fase de alineacion antes de ejecutar la maniobra:
-# el robot frena y corrige su heading durante ALIGN_DURATION segundos
-# antes de empezar a girar o ir recto en la interseccion.
-ALIGN_DURATION   = 0.6    # segundos de correccion antes de ejecutar
-ALIGN_KP         = 0.5    # ganancia de correccion de heading
+EXEC_MIN_TIME    = 1.8    # tiempo MINIMO ejecutando antes de que found=True termine
+                          # evita salir por la linea punteada del otro lado
+KP_AHEAD         = 0.4
+ALIGN_DURATION   = 0.5    # segundos de correccion de heading antes de ejecutar
+ALIGN_KP         = 0.5
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
@@ -348,7 +347,9 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_L:
-            if found or now - self._state_t0 >= EXEC_TIMEOUT:
+            elapsed = now - self._state_t0
+            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
+            if done:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
@@ -356,7 +357,9 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_R:
-            if found or now - self._state_t0 >= EXEC_TIMEOUT:
+            elapsed = now - self._state_t0
+            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
+            if done:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_R
@@ -364,7 +367,9 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_FWD:
-            if found or now - self._state_t0 >= EXEC_TIMEOUT:
+            elapsed = now - self._state_t0
+            done = (found and elapsed >= EXEC_MIN_TIME) or elapsed >= EXEC_TIMEOUT
+            if done:
                 self._pending = None; self._enter(ST_FOLLOWING)
             else:
                 correction = KP_AHEAD * self._last_error
