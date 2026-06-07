@@ -29,7 +29,21 @@ echo "=== Iniciando web_viz  http://${ROBOT_IP}:8080 ==="
 ros2 run straight_line web_viz &
 sleep 1
 
+echo "=== Iniciando RPLiDAR A1 ==="
+ros2 run rplidar_ros rplidar_composition \
+    --ros-args \
+    -p serial_port:=/dev/ttyUSB1 \
+    -p serial_baudrate:=115200 \
+    -p frame_id:=laser \
+    -p angle_compensate:=true \
+    -p scan_mode:=Standard &
+sleep 2
+
+echo "=== Iniciando obstacle_stop ==="
+ros2 run straight_line obstacle_stop &
+sleep 1
+
 echo "=== Iniciando seguidor de linea ==="
 ros2 run straight_line line_follower_cv
 
-kill %1 %2 %3 %4 %5
+kill %1 %2 %3 %4 %5 %6 %7
