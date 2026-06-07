@@ -78,14 +78,18 @@ DOT_ROI_RIGHT= 0.90
 
 # Deteccion del patron: necesita al menos DOT_MIN_COUNT contornos separados
 # que esten distribuidos en al menos DOT_MIN_SPREAD fraccion del ancho del ROI
-DOT_MIN_COUNT    = 2      # minimo de segmentos/puntos separados
-DOT_MAX_AREA     = 800    # area maxima de cada punto (no la linea solida)
-DOT_MIN_AREA     = 30     # area minima para no contar ruido
-DOT_MIN_SPREAD   = 0.25   # los puntos deben cubrir al menos el 25% del ancho
+DOT_MIN_COUNT    = 3      # minimo de segmentos/puntos separados
+DOT_MAX_AREA     = 600    # area maxima de cada punto (no la linea solida)
+DOT_MIN_AREA     = 60     # area minima para no contar ruido de textura
+DOT_MIN_SPREAD   = 0.40   # los puntos deben cubrir al menos el 40% del ancho
 
 # Frames consecutivos para confirmar patron o su desaparicion
-DOT_CONFIRM_ON   = 4    # frames con patron para entrar a APPROACHING
-DOT_CONFIRM_OFF  = 6    # frames sin patron (estando en APPROACHING) para ejecutar
+DOT_CONFIRM_ON   = 10   # frames con patron para entrar a APPROACHING (mas robusto)
+DOT_CONFIRM_OFF  = 8    # frames sin patron (estando en APPROACHING) para ejecutar
+
+# Cooldown tras ejecutar una accion en interseccion
+# Evita que el detector dispare de nuevo inmediatamente al salir
+DOT_EXEC_COOLDOWN = 5.0   # segundos sin deteccion tras EXEC_*
 
 # -----------------------------------------------------------------------
 # VISION LINEA
@@ -258,8 +262,9 @@ class LineFollowerCV(Node):
         self._sign_last_t = {}
 
         # Contadores de confirmacion del patron punteado
-        self._dot_on_count  = 0   # frames consecutivos con patron
-        self._dot_off_count = 0   # frames consecutivos sin patron (en APPROACHING)
+        self._dot_on_count  = 0
+        self._dot_off_count = 0
+        self._dot_cooldown_t = 0.0  # tiempo en que termino el ultimo EXEC_*
 
         self._pub_cmd = self.create_publisher(Twist,   '/cmd_vel',          qos_be)
         self._pub_dbg = self.create_publisher(Image,   '/vision/debug_img', 10)
@@ -350,6 +355,12 @@ class LineFollowerCV(Node):
         if self._state in (ST_EXEC_L, ST_EXEC_R, ST_EXEC_FWD, ST_STOP_WAIT):
             return  # no cambiar estado durante ejecucion
 
+        # Cooldown: ignorar el detector justo despues de ejecutar una accion
+        if time.monotonic() - self._dot_cooldown_t < DOT_EXEC_COOLDOWN:
+            self._dot_on_count  = 0
+            self._dot_off_count = 0
+            return
+
         if self._state == ST_FOLLOWING:
             if dot_visible:
                 self._dot_on_count += 1
@@ -402,7 +413,9 @@ class LineFollowerCV(Node):
 
         if self._state == ST_EXEC_L:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._pending = None; self._enter(ST_FOLLOWING)
+                self._pending = None
+                self._dot_cooldown_t = time.monotonic()
+                self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
                 self._pub_cmd.publish(cmd)
@@ -410,7 +423,9 @@ class LineFollowerCV(Node):
 
         if self._state == ST_EXEC_R:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._pending = None; self._enter(ST_FOLLOWING)
+                self._pending = None
+                self._dot_cooldown_t = time.monotonic()
+                self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_R
                 self._pub_cmd.publish(cmd)
@@ -418,7 +433,9 @@ class LineFollowerCV(Node):
 
         if self._state == ST_EXEC_FWD:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._pending = None; self._enter(ST_FOLLOWING)
+                self._pending = None
+                self._dot_cooldown_t = time.monotonic()
+                self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
                 self._pub_cmd.publish(cmd)
