@@ -49,10 +49,17 @@ SLOW_SIGN_FACTOR = 0.55
 # Zona muerta mas grande: en recta ignora errores pequeños -> va mas recto
 ERROR_DEADBAND  = 0.09   # era 0.05 -> mas estabilidad en recta
 
-# ROI
+# ROI seguidor de linea
 ROI_TOP_FRAC   = 0.78
-ROI_LEFT_FRAC  = 0.33
-ROI_RIGHT_FRAC = 0.67
+ROI_LEFT_FRAC  = 0.25
+ROI_RIGHT_FRAC = 0.68
+
+# ROI deteccion de amarillo (banda encima del ROI del seguidor)
+YELLOW_ROI_TOP_FRAC    = 0.55   # donde empieza el ROI amarillo
+YELLOW_ROI_BOTTOM_FRAC = 0.75   # donde termina  (justo encima del seguidor)
+YELLOW_ROI_LEFT_FRAC   = 0.25
+YELLOW_ROI_RIGHT_FRAC  = 0.68
+YELLOW_FILL_THRESH     = 0.15   # 40 %: si mas del 40% del ROI es amarillo -> detener
 
 # Vision
 ADAPT_BLOCK = 25
@@ -68,23 +75,27 @@ RECOVERY_OMEGA  = 0.20
 
 # Interseccion y senales
 INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin pending)
-INTERSECT_PREP_TURN = 1.5         # segundos recto antes de ejecutar giro (TurnL/TurnR)
-INTERSECT_PREP_FWD  = 1.0         # segundos recto antes de ejecutar recto (AOnly/Round)
+INTERSECT_PREP_TURN = 3.0         # segundos recto antes de ejecutar giro (TurnL/TurnR)
+INTERSECT_PREP_FWD  = 4.0         # segundos recto antes de ejecutar recto (AOnly/Round)
 STOP_DURATION    = 3.0
-TURN_LINEAR      = 0.07
-TURN_OMEGA_L     = +0.50
-TURN_OMEGA_R     = -0.65   # mas agresivo para no abrir tanto la curva
-EXEC_TIMEOUT     = 3.0            # segundos ejecutando el giro ignorando seguidor
+TURN_LINEAR      = 0.0            # spin puro: rueda interior va para atras
+TURN_OMEGA_L     = +0.60
+TURN_OMEGA_R     = -0.30
+TURN_OMEGA_L1     = -0.30
+TURN_OMEGA_R1     = +0.60
+POST_TURN_TIME   = 0.9          # segundos recto despues del giro para pasar punteados
+EXEC_TIMEOUT     = 3.5            # segundos ejecutando el giro ignorando seguidor
 
 # Cooldown: segundos que deben pasar antes de reaccionar a la MISMA senal
 SIGN_COOLDOWN = 8.0
 
 ST_FOLLOWING      = 'following'
 ST_STOP_WAIT      = 'stop_wait'
-ST_INTERSECT_PREP = 'intersect_prep'  # avanza recto 0.5s antes de ejecutar
+ST_INTERSECT_PREP = 'intersect_prep'  # avanza recto antes de ejecutar
 ST_EXEC_L         = 'exec_left'
 ST_EXEC_R         = 'exec_right'
 ST_EXEC_FWD       = 'exec_ahead'
+ST_POST_TURN      = 'post_turn'       # avanza recto despues del giro (pasa punteados)
 
 
 # -----------------------------------------------------------------------
@@ -116,8 +127,29 @@ class ContourLineDetector:
                 best_d = d; best = (cnt, int(cx), int(cy))
         return best
 
+    def _yellow_ratio(self, frame, h, w):
+        """Calcula la fraccion de pixeles amarillos en el ROI superior."""
+        y0 = int(h * YELLOW_ROI_TOP_FRAC)
+        y1 = int(h * YELLOW_ROI_BOTTOM_FRAC)
+        x0 = int(w * YELLOW_ROI_LEFT_FRAC)
+        x1 = int(w * YELLOW_ROI_RIGHT_FRAC)
+        roi = frame[y0:y1, x0:x1]
+        if roi.size == 0:
+            return 0.0
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        # Rango HSV para amarillo
+        mask = cv2.inRange(hsv,
+                           np.array([18, 80, 80],  dtype=np.uint8),
+                           np.array([35, 255, 255], dtype=np.uint8))
+        ratio = float(np.count_nonzero(mask)) / float(mask.size)
+        return ratio, mask, (y0, y1, x0, x1)
+
     def process(self, frame):
         h, w = frame.shape[:2]
+
+        # --- Deteccion de amarillo en ROI superior ---
+        yellow_ratio, yellow_mask, (yy0, yy1, yx0, yx1) = self._yellow_ratio(frame, h, w)
+
         roi_y0 = int(h * ROI_TOP_FRAC)
         roi_x0 = int(w * ROI_LEFT_FRAC)
         roi_x1 = int(w * ROI_RIGHT_FRAC)
@@ -199,7 +231,18 @@ class ContourLineDetector:
             cv2.rectangle(debug,(x0t,y0t),(x0t+tw2,y0t+th2),(150,150,150),1)
             cv2.putText(debug,'MASK',(x0t+3,y0t+14),cv2.FONT_HERSHEY_SIMPLEX,0.4,(200,200,200),1)
 
-        return error_norm, found, debug
+        # --- Debug: dibujar ROI amarillo sobre la imagen ---
+        roi_color = (0, 200, 255) if yellow_ratio >= YELLOW_FILL_THRESH else (0, 255, 200)
+        cv2.rectangle(debug, (yx0, yy0), (yx1, yy1), roi_color, 2)
+        ytxt = 'YEL:{:.0f}%{}'.format(
+            yellow_ratio * 100,
+            ' STOP' if yellow_ratio >= YELLOW_FILL_THRESH else '')
+        cv2.putText(debug, ytxt, (yx0, yy0 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+        cv2.putText(debug, ytxt, (yx0, yy0 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, roi_color, 1)
+
+        return error_norm, found, yellow_ratio, debug
 
 
 # -----------------------------------------------------------------------
@@ -226,6 +269,7 @@ class LineFollowerCV(Node):
         self._slow_sign   = False
         self._state       = ST_FOLLOWING
         self._state_t0    = 0.0
+        self._yellow_stop = False          # True mientras el ROI amarillo este activo
         # Cooldown por senal: guarda el tiempo en que se activo cada senal
         self._sign_last_t = {}   # {nombre_senal: time.monotonic()}
 
@@ -287,12 +331,22 @@ class LineFollowerCV(Node):
         except Exception as e:
             self.get_logger().warn('cv_bridge: {}'.format(e)); return
 
-        error_norm, found, debug = self._detector.process(frame)
+        error_norm, found, yellow_ratio, debug = self._detector.process(frame)
+
+        # Actualizar flag de parada por amarillo
+        prev_yellow = self._yellow_stop
+        self._yellow_stop = yellow_ratio >= YELLOW_FILL_THRESH
+        if self._yellow_stop != prev_yellow:
+            self.get_logger().info(
+                'Amarillo ROI: {:.0f}% -> robot {}'.format(
+                    yellow_ratio * 100,
+                    'DETENIDO' if self._yellow_stop else 'reanudado'))
 
         # Anotar estado en debug
         sc = {ST_FOLLOWING:(0,255,120), ST_STOP_WAIT:(0,0,220),
               ST_INTERSECT_PREP:(0,180,255),
-              ST_EXEC_L:(255,200,0), ST_EXEC_R:(255,100,0), ST_EXEC_FWD:(0,200,255)}
+              ST_EXEC_L:(255,200,0), ST_EXEC_R:(255,100,0), ST_EXEC_FWD:(0,200,255),
+              ST_POST_TURN:(180,255,100)}
         txt = 'ST:{} SGN:{} PND:{}'.format(self._state.upper()[:4],
               self._sign[:4], self._pending or '-')
         cv2.putText(debug, txt, (8,22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3)
@@ -313,6 +367,12 @@ class LineFollowerCV(Node):
         self.get_logger().info('Estado: {}'.format(state))
 
     def _run(self, error, found):
+        # Parada por deteccion de amarillo: tiene prioridad sobre todo excepto
+        # sobre ST_STOP_WAIT (para no interferir con la logica de la senal STOP)
+        if self._yellow_stop and self._state not in (ST_STOP_WAIT,):
+            self._pub_cmd.publish(Twist())
+            return
+
         now = time.monotonic()
 
         if self._state == ST_STOP_WAIT:
@@ -337,16 +397,16 @@ class LineFollowerCV(Node):
             return
 
         if self._state == ST_EXEC_L:
-            if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._pending = None; self._enter(ST_FOLLOWING)
+            if now - self._state_t0 >= EXEC_TIMEOUT:
+                self._pending = None; self._enter(ST_POST_TURN)
             else:
-                cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_L
+                cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = -TURN_OMEGA_R
                 self._pub_cmd.publish(cmd)
             return
 
         if self._state == ST_EXEC_R:
-            if found or now - self._state_t0 >= EXEC_TIMEOUT:
-                self._pending = None; self._enter(ST_FOLLOWING)
+            if now - self._state_t0 >= EXEC_TIMEOUT:
+                self._pending = None; self._enter(ST_POST_TURN)
             else:
                 cmd = Twist(); cmd.linear.x = TURN_LINEAR; cmd.angular.z = TURN_OMEGA_R
                 self._pub_cmd.publish(cmd)
@@ -355,6 +415,15 @@ class LineFollowerCV(Node):
         if self._state == ST_EXEC_FWD:
             if found or now - self._state_t0 >= EXEC_TIMEOUT:
                 self._pending = None; self._enter(ST_FOLLOWING)
+            else:
+                cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
+                self._pub_cmd.publish(cmd)
+            return
+
+        # Recto POST_TURN_TIME segundos tras el giro para pasar los punteados
+        if self._state == ST_POST_TURN:
+            if now - self._state_t0 >= POST_TURN_TIME:
+                self._enter(ST_FOLLOWING)
             else:
                 cmd = Twist(); cmd.linear.x = LINEAR_VEL; cmd.angular.z = 0.0
                 self._pub_cmd.publish(cmd)
