@@ -135,7 +135,7 @@ class ContourLineDetector:
         x1 = int(w * YELLOW_ROI_RIGHT_FRAC)
         roi = frame[y0:y1, x0:x1]
         if roi.size == 0:
-            return 0.0
+            return 0.0, np.zeros((1, 1), dtype=np.uint8), (y0, y1, x0, x1)
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         # Rango HSV para amarillo
         mask = cv2.inRange(hsv,
