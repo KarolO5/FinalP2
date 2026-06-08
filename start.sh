@@ -34,10 +34,17 @@ ros2 run straight_line web_viz &
 sleep 1
 
 echo "=== Iniciando RPLiDAR A1 ==="
-ros2 launch rplidar_ros rplidar.launch.py \
-    serial_port:=/dev/rplidar \
-    serial_baudrate:=115200 \
-    frame_id:=laser &
+# Reset USB para limpiar estado previo (evita RESULT_OPERATION_TIMEOUT)
+echo '3-1' | sudo tee /sys/bus/usb/drivers/usb/unbind > /dev/null 2>&1
+sleep 3
+echo '3-1' | sudo tee /sys/bus/usb/drivers/usb/bind > /dev/null 2>&1
+sleep 3
+ros2 run rplidar_ros rplidar_composition \
+    --ros-args \
+    -p channel_type:=serial \
+    -p serial_port:=/dev/rplidar \
+    -p serial_baudrate:=115200 \
+    -p frame_id:=laser &
 sleep 4
 
 echo "=== Iniciando obstacle_stop ==="
