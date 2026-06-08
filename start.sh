@@ -8,6 +8,10 @@ ROBOT_IP=$(hostname -I | awk '{print $1}')
 
 # micro_ros_agent se corre manualmente desde otro SSH:
 # ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/hackerboard -b 115200
+#
+# udev rules en /etc/udev/rules.d/99-puzzlebot.rules:
+#   HackerBoard serial: 0001                            -> /dev/hackerboard
+#   RPLiDAR serial:     26fe7efa28ffec1186596d508ce70331 -> /dev/rplidar
 
 echo "=== Iniciando odometria ==="
 ros2 run straight_line odometry &
@@ -35,9 +39,8 @@ ros2 run rplidar_ros rplidar_composition \
     -p serial_port:=/dev/rplidar \
     -p serial_baudrate:=115200 \
     -p frame_id:=laser \
-    -p angle_compensate:=true \
-    -p scan_mode:=Standard &
-sleep 2
+    -p angle_compensate:=true &
+sleep 4
 
 echo "=== Iniciando obstacle_stop ==="
 ros2 run straight_line obstacle_stop &
