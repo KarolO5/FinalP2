@@ -34,8 +34,10 @@ ros2 run straight_line web_viz &
 sleep 1
 
 echo "=== Iniciando RPLiDAR A1 ==="
-ros2 launch rplidar_ros rplidar_a1_launch.py \
-    serial_port:=/dev/rplidar &
+ros2 launch rplidar_ros rplidar.launch.py \
+    serial_port:=/dev/rplidar \
+    serial_baudrate:=115200 \
+    frame_id:=laser &
 sleep 4
 
 echo "=== Iniciando obstacle_stop ==="
