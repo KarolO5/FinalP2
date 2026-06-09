@@ -29,7 +29,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg   import Image
-from std_msgs.msg      import Float32, String
+from std_msgs.msg      import Bool, Float32, String
 from cv_bridge         import CvBridge
 from rclpy.qos         import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
@@ -271,6 +271,7 @@ class LineFollowerCV(Node):
         self._state       = ST_FOLLOWING
         self._state_t0    = 0.0
         self._yellow_stop = False
+        self._lidar_stop  = False
         self._sign_last_t = {}
 
         self._pub_cmd = self.create_publisher(Twist,   '/cmd_vel',          qos_be)
@@ -280,9 +281,16 @@ class LineFollowerCV(Node):
         self.create_subscription(Image,  '/image/raw',       self._image_cb,    qos_be)
         self.create_subscription(String, '/semaforo/estado', self._semaforo_cb, 10)
         self.create_subscription(String, '/sign/deteccion',  self._sign_cb,     10)
+        self.create_subscription(Bool,   '/lidar/parar',     self._lidar_cb,    10)
 
         self.get_logger().info('LineFollowerCV listo | KP={} KI={} KD={} v={}'.format(
             KP, KI, KD, LINEAR_VEL))
+
+    def _lidar_cb(self, msg: Bool):
+        if msg.data != self._lidar_stop:
+            self._lidar_stop = msg.data
+            self.get_logger().warn(
+                'Lidar: {}'.format('OBSTACULO — frenado' if msg.data else 'libre'))
 
     def _semaforo_cb(self, msg):
         nuevo = msg.data
@@ -375,6 +383,10 @@ class LineFollowerCV(Node):
         # Parada por deteccion de amarillo: tiene prioridad sobre todo excepto
         # sobre ST_STOP_WAIT (para no interferir con la logica de la senal STOP)
         if self._yellow_stop and self._state not in (ST_STOP_WAIT,):
+            self._pub_cmd.publish(Twist())
+            return
+
+        if self._lidar_stop and self._state not in (ST_STOP_WAIT,):
             self._pub_cmd.publish(Twist())
             return
 
