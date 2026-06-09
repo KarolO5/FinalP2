@@ -73,6 +73,16 @@ MAX_ASPECT_RATIO  = 2.5   # ancho/alto maximo: >2.5 = horizontal = junta o punte
 RECOVERY_FRAMES = 25
 RECOVERY_OMEGA  = 0.20
 
+# Deteccion lateral (Hough en zonas no usadas por el seguidor)
+LATERAL_BIAS_MAX = 0.06   # bias maximo que se suma al error (muy pequeño)
+LATERAL_HOUGH_TH = 25     # votos minimos HoughLinesP
+LATERAL_MIN_LEN  = 18     # longitud minima de segmento (px)
+LATERAL_MAX_GAP  = 10     # gap maximo entre segmentos (px)
+
+# Kalman 1D para suavizar el error antes del PID
+KALMAN_Q = 0.005   # ruido del proceso  (bajo = mas suave)
+KALMAN_R = 0.08    # ruido de medicion  (alto = mas suave)
+
 # Interseccion y senales
 INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin pending)
 INTERSECT_PREP_TURN = 3.0         # segundos recto antes de ejecutar giro (TurnL/TurnR)
@@ -99,6 +109,27 @@ ST_POST_TURN      = 'post_turn'       # avanza recto despues del giro (pasa punt
 
 
 # -----------------------------------------------------------------------
+# KALMAN 1D  --  suaviza el error escalar antes del PID
+# -----------------------------------------------------------------------
+class Kalman1D:
+    def __init__(self, q=KALMAN_Q, r=KALMAN_R):
+        self._x = 0.0
+        self._p = 1.0
+        self._q = q
+        self._r = r
+
+    def update(self, z):
+        p_pred  = self._p + self._q
+        k       = p_pred / (p_pred + self._r)
+        self._x = self._x + k * (z - self._x)
+        self._p = (1.0 - k) * p_pred
+        return self._x
+
+    def reset(self, z=0.0):
+        self._x = z; self._p = 1.0
+
+
+# -----------------------------------------------------------------------
 # DETECTOR (banda unica, seleccion por proximidad)
 # -----------------------------------------------------------------------
 class ContourLineDetector:
@@ -106,6 +137,7 @@ class ContourLineDetector:
     def __init__(self):
         self._kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
         self._kernel_open  = cv2.getStructuringElement(cv2.MORPH_RECT, OPEN_KSIZE)
+        self._kalman       = Kalman1D()
 
     def _best_contour(self, contours, roi_w, roi_h):
         best = None; best_d = float('inf')
@@ -143,6 +175,35 @@ class ContourLineDetector:
                            np.array([35, 255, 255], dtype=np.uint8))
         ratio = float(np.count_nonzero(mask)) / float(mask.size)
         return ratio, mask, (y0, y1, x0, x1)
+
+    def _detect_lateral(self, frame, roi_y0, roi_x0, roi_x1, h, w):
+        """Detecta lineas en las zonas laterales no usadas por el seguidor.
+        Retorna (bias, left_det, right_det).
+        bias > 0 -> empuja derecha (pared izquierda detectada)
+        bias < 0 -> empuja izquierda (pared derecha detectada)"""
+
+        def _has_lines(zone):
+            if zone.size == 0 or zone.shape[1] < 5:
+                return False
+            gray  = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150)
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180,
+                                    threshold=LATERAL_HOUGH_TH,
+                                    minLineLength=LATERAL_MIN_LEN,
+                                    maxLineGap=LATERAL_MAX_GAP)
+            return lines is not None
+
+        left_det  = _has_lines(frame[roi_y0:h, 0:roi_x0])
+        right_det = _has_lines(frame[roi_y0:h, roi_x1:w])
+
+        if left_det and not right_det:
+            bias = +LATERAL_BIAS_MAX
+        elif right_det and not left_det:
+            bias = -LATERAL_BIAS_MAX
+        else:
+            bias = 0.0
+
+        return bias, left_det, right_det
 
     def process(self, frame):
         h, w = frame.shape[:2]
@@ -242,7 +303,29 @@ class ContourLineDetector:
         cv2.putText(debug, ytxt, (yx0, yy0 - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, roi_color, 1)
 
-        return error_norm, found, yellow_ratio, debug
+        # --- Kalman + deteccion lateral ---
+        lateral_bias, left_det, right_det = self._detect_lateral(
+            frame, roi_y0, roi_x0, roi_x1, h, w)
+
+        # Kalman: si no hay linea reseteamos para no arrastrar error viejo
+        if not found:
+            self._kalman.reset(error_norm)
+        error_filtered = self._kalman.update(error_norm)
+        error_out = float(np.clip(error_filtered + lateral_bias, -1.0, 1.0))
+
+        # Debug lateral: borde de las zonas laterales
+        lc = (0, 80, 255) if left_det  else (40, 0, 60)
+        rc = (0, 80, 255) if right_det else (40, 0, 60)
+        cv2.rectangle(debug, (0, roi_y0),      (roi_x0, h), lc, 2)
+        cv2.rectangle(debug, (roi_x1, roi_y0), (w, h),      rc, 2)
+        if left_det:
+            cv2.putText(debug, 'L', (4, roi_y0 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, lc, 2)
+        if right_det:
+            cv2.putText(debug, 'R', (roi_x1 + 4, roi_y0 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, rc, 2)
+
+        return error_out, found, yellow_ratio, debug
 
 
 # -----------------------------------------------------------------------
