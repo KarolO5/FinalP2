@@ -34,11 +34,7 @@ ros2 run straight_line web_viz &
 sleep 1
 
 echo "=== Iniciando RPLiDAR A1 ==="
-# Reset USB para limpiar estado previo (evita RESULT_OPERATION_TIMEOUT)
-echo '3-1' | sudo tee /sys/bus/usb/drivers/usb/unbind > /dev/null 2>&1
-sleep 3
-echo '3-1' | sudo tee /sys/bus/usb/drivers/usb/bind > /dev/null 2>&1
-sleep 3
+python3 ~/FinalP2/puzzlebot_ws/src/straight_line/straight_line/lidar_preinit.py
 ros2 run rplidar_ros rplidar_composition \
     --ros-args \
     -p channel_type:=serial \
