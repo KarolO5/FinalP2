@@ -19,6 +19,8 @@ from std_msgs.msg import Bool
 
 DISTANCIA_PELIGRO = 0.35   # metros
 ANGULO_FRONTAL    = 30.0   # grados a cada lado del frente
+FRAMES_PARA_FRENAR  = 3    # frames consecutivos con obstaculo para activar freno
+FRAMES_PARA_LIBERAR = 5    # frames consecutivos sin obstaculo para liberar
 
 
 class LidarStop(Node):
@@ -26,7 +28,9 @@ class LidarStop(Node):
     def __init__(self):
         super().__init__('lidar_stop')
 
-        self._parar = False
+        self._parar          = False
+        self._frames_obst    = 0
+        self._frames_libre   = 0
 
         self._pub = self.create_publisher(Bool, '/lidar/parar', 10)
 
@@ -51,12 +55,19 @@ class LidarStop(Node):
                 hay_obstaculo = True
                 break
 
-        if hay_obstaculo != self._parar:
-            self._parar = hay_obstaculo
-            if hay_obstaculo:
-                self.get_logger().warn('OBSTACULO DETECTADO — frenando')
-            else:
-                self.get_logger().info('Camino libre — reanudando')
+        if hay_obstaculo:
+            self._frames_obst  += 1
+            self._frames_libre  = 0
+        else:
+            self._frames_libre += 1
+            self._frames_obst   = 0
+
+        if not self._parar and self._frames_obst >= FRAMES_PARA_FRENAR:
+            self._parar = True
+            self.get_logger().warn('OBSTACULO DETECTADO — frenando')
+        elif self._parar and self._frames_libre >= FRAMES_PARA_LIBERAR:
+            self._parar = False
+            self.get_logger().info('Camino libre — reanudando')
 
         out = Bool()
         out.data = self._parar
