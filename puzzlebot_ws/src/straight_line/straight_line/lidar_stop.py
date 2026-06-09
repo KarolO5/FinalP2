@@ -41,7 +41,7 @@ class LidarStop(Node):
         total = len(msg.ranges)
         inc   = msg.angle_increment
 
-        idx_centro = int(round((0.0 - msg.angle_min) / inc))
+        idx_centro = int(round((math.pi - msg.angle_min) / inc))
         idx_delta  = int(round(angulo_rad / inc))
 
         hay_obstaculo = False
