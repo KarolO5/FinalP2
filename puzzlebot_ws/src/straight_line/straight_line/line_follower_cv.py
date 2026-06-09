@@ -83,6 +83,9 @@ LATERAL_MAX_GAP  = 10     # gap maximo entre segmentos (px)
 KALMAN_Q = 0.005   # ruido del proceso  (bajo = mas suave)
 KALMAN_R = 0.08    # ruido de medicion  (alto = mas suave)
 
+# Frames sin linea para deshabilitar deteccion lateral (interseccion/senal)
+LATERAL_DISABLE_FRAMES = 4
+
 # Interseccion y senales
 INTERSECT_FRAMES    = 20          # frames sin linea para recovery normal (sin pending)
 INTERSECT_PREP_TURN = 3.0         # segundos recto antes de ejecutar giro (TurnL/TurnR)
@@ -135,9 +138,11 @@ class Kalman1D:
 class ContourLineDetector:
 
     def __init__(self):
-        self._kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
-        self._kernel_open  = cv2.getStructuringElement(cv2.MORPH_RECT, OPEN_KSIZE)
-        self._kalman       = Kalman1D()
+        self._kernel_close      = cv2.getStructuringElement(cv2.MORPH_RECT, MORPH_KSIZE)
+        self._kernel_open       = cv2.getStructuringElement(cv2.MORPH_RECT, OPEN_KSIZE)
+        self._kalman            = Kalman1D()
+        self._lateral_active    = True
+        self._lost_frames_lat   = 0
 
     def _best_contour(self, contours, roi_w, roi_h):
         best = None; best_d = float('inf')
@@ -304,8 +309,21 @@ class ContourLineDetector:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, roi_color, 1)
 
         # --- Kalman + deteccion lateral ---
-        lateral_bias, left_det, right_det = self._detect_lateral(
-            frame, roi_y0, roi_x0, roi_x1, h, w)
+        # Deshabilitar laterales cuando se pierde la linea (interseccion/senal)
+        # y reactivar solo cuando el seguidor la encuentra de nuevo por si solo
+        if not found:
+            self._lost_frames_lat += 1
+            if self._lost_frames_lat >= LATERAL_DISABLE_FRAMES:
+                self._lateral_active = False
+        else:
+            self._lost_frames_lat = 0
+            self._lateral_active  = True
+
+        if self._lateral_active:
+            lateral_bias, left_det, right_det = self._detect_lateral(
+                frame, roi_y0, roi_x0, roi_x1, h, w)
+        else:
+            lateral_bias, left_det, right_det = 0.0, False, False
 
         # Kalman: si no hay linea reseteamos para no arrastrar error viejo
         if not found:
