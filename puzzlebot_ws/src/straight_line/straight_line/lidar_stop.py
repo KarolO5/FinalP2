@@ -18,7 +18,8 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 
 DISTANCIA_PELIGRO = 0.35   # metros
-ANGULO_FRONTAL    = 30.0   # grados a cada lado del frente
+ANGULO_IZQ        = 60.0   # grados a la izquierda del centro
+ANGULO_DER        = 30.0   # grados a la derecha del centro
 FRAMES_PARA_FRENAR  = 3    # frames consecutivos con obstaculo para activar freno
 FRAMES_PARA_LIBERAR = 5    # frames consecutivos sin obstaculo para liberar
 
@@ -37,19 +38,19 @@ class LidarStop(Node):
         self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
 
         self.get_logger().info(
-            'LidarStop listo | dist={:.2f}m angulo=+-{}deg'.format(
-                DISTANCIA_PELIGRO, ANGULO_FRONTAL))
+            'LidarStop listo | dist={:.2f}m angulo=-{}deg/+{}deg'.format(
+                DISTANCIA_PELIGRO, ANGULO_DER, ANGULO_IZQ))
 
     def _scan_cb(self, msg: LaserScan):
-        angulo_rad = math.radians(ANGULO_FRONTAL)
         total = len(msg.ranges)
         inc   = msg.angle_increment
 
         idx_centro = int(round((math.pi - msg.angle_min) / inc))
-        idx_delta  = int(round(angulo_rad / inc))
+        idx_izq    = int(round(math.radians(ANGULO_IZQ) / inc))
+        idx_der    = int(round(math.radians(ANGULO_DER) / inc))
 
         hay_obstaculo = False
-        for i in range(idx_centro - idx_delta, idx_centro + idx_delta + 1):
+        for i in range(idx_centro - idx_der, idx_centro + idx_izq + 1):
             r = msg.ranges[i % total]
             if msg.range_min < r < DISTANCIA_PELIGRO:
                 hay_obstaculo = True
