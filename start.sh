@@ -33,14 +33,21 @@ echo "=== Iniciando web_viz  http://${ROBOT_IP}:8080 ==="
 ros2 run straight_line web_viz &
 sleep 1
 
-echo "=== Iniciando RPLiDAR A1 (power cycle via authorized) ==="
-echo 0 | sudo tee /sys/bus/usb/devices/3-1/authorized > /dev/null
-sleep 3
-echo 1 | sudo tee /sys/bus/usb/devices/3-1/authorized > /dev/null
-sleep 3
+echo "=== Iniciando RPLiDAR A1 (double-init) ==="
+# Primer intento: manda STOP al lidar aunque falle el init
 ros2 run rplidar_ros rplidar_composition \
-    --ros-args \
-    -p channel_type:=serial \
+    --ros-args -p channel_type:=serial \
+    -p serial_port:=/dev/rplidar \
+    -p serial_baudrate:=115200 \
+    -p frame_id:=laser &
+RPLIDAR_FIRST=$!
+sleep 7
+kill $RPLIDAR_FIRST 2>/dev/null
+sleep 2
+# Segundo intento: lidar ya debe estar en idle
+echo "=== RPLiDAR segundo intento ==="
+ros2 run rplidar_ros rplidar_composition \
+    --ros-args -p channel_type:=serial \
     -p serial_port:=/dev/rplidar \
     -p serial_baudrate:=115200 \
     -p frame_id:=laser &
