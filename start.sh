@@ -13,8 +13,8 @@ ROBOT_IP=$(hostname -I | awk '{print $1}')
 #   HackerBoard serial: 0001                             -> /dev/hackerboard
 #   RPLiDAR serial:     26fe7efa28ffec1186596d508ce70331 -> /dev/rplidar
 
-echo "=== Conectando RPLiDAR por serial ==="
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/rplidar -b 115200 &
+echo "=== Conectando HackerBoard (micro-ROS) ==="
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/hackerboard -b 115200 &
 sleep 2
 
 echo "=== Iniciando odometria ==="
