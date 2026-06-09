@@ -13,6 +13,10 @@ ROBOT_IP=$(hostname -I | awk '{print $1}')
 #   HackerBoard serial: 0001                             -> /dev/hackerboard
 #   RPLiDAR serial:     26fe7efa28ffec1186596d508ce70331 -> /dev/rplidar
 
+echo "=== Conectando RPLiDAR por serial ==="
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/rplidar -b 115200 &
+sleep 2
+
 echo "=== Iniciando odometria ==="
 ros2 run straight_line odometry &
 sleep 2
@@ -42,11 +46,11 @@ ros2 run rplidar_ros rplidar_composition \
     -p angle_compensate:=true &
 sleep 2
 
-echo "=== Iniciando obstacle_stop ==="
-ros2 run straight_line obstacle_stop &
+echo "=== Iniciando lidar_stop ==="
+ros2 run straight_line lidar_stop &
 sleep 1
 
 echo "=== Iniciando seguidor de linea ==="
 ros2 run straight_line line_follower_cv
 
-kill %1 %2 %3 %4 %5 %6 %7
+kill %1 %2 %3 %4 %5 %6 %7 %8
