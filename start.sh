@@ -34,6 +34,7 @@ ros2 run straight_line web_viz &
 sleep 1
 
 echo "=== Iniciando RPLiDAR A1 ==="
+stty -F /dev/rplidar 115200 raw -crtscts -hupcl clocal 2>/dev/null
 python3 ~/FinalP2/puzzlebot_ws/src/straight_line/straight_line/lidar_preinit.py
 ros2 run rplidar_ros rplidar_composition \
     --ros-args \
