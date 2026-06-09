@@ -27,15 +27,14 @@ def main():
         p.write(b'\xa5\x25')
         time.sleep(0.15)
 
-    # Drena hasta que no lleguen datos por 1.5 s
+    # Drena por maximo 4 segundos
     p.timeout = 0.1
-    deadline = time.time() + 5.0
+    hard_limit = time.time() + 4.0
     total = 0
-    while time.time() < deadline:
+    while time.time() < hard_limit:
         chunk = p.read(512)
         if chunk:
             total += len(chunk)
-            deadline = time.time() + 1.5  # reinicia si sigue llegando
 
     p.reset_input_buffer()
     p.reset_output_buffer()
