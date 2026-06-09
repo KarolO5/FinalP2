@@ -10,7 +10,7 @@ ROBOT_IP=$(hostname -I | awk '{print $1}')
 # ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/hackerboard -b 115200
 #
 # udev rules en /etc/udev/rules.d/99-puzzlebot.rules:
-#   HackerBoard serial: 0001                            -> /dev/hackerboard
+#   HackerBoard serial: 0001                             -> /dev/hackerboard
 #   RPLiDAR serial:     26fe7efa28ffec1186596d508ce70331 -> /dev/rplidar
 
 echo "=== Iniciando odometria ==="
@@ -33,25 +33,14 @@ echo "=== Iniciando web_viz  http://${ROBOT_IP}:8080 ==="
 ros2 run straight_line web_viz &
 sleep 1
 
-echo "=== Iniciando RPLiDAR A1 (double-init) ==="
-# Primer intento: manda STOP al lidar aunque falle el init
+echo "=== Iniciando RPLiDAR A1 ==="
 ros2 run rplidar_ros rplidar_composition \
-    --ros-args -p channel_type:=serial \
+    --ros-args \
     -p serial_port:=/dev/rplidar \
     -p serial_baudrate:=115200 \
-    -p frame_id:=laser &
-RPLIDAR_FIRST=$!
-sleep 7
-kill $RPLIDAR_FIRST 2>/dev/null
+    -p frame_id:=laser \
+    -p angle_compensate:=true &
 sleep 2
-# Segundo intento: lidar ya debe estar en idle
-echo "=== RPLiDAR segundo intento ==="
-ros2 run rplidar_ros rplidar_composition \
-    --ros-args -p channel_type:=serial \
-    -p serial_port:=/dev/rplidar \
-    -p serial_baudrate:=115200 \
-    -p frame_id:=laser &
-sleep 4
 
 echo "=== Iniciando obstacle_stop ==="
 ros2 run straight_line obstacle_stop &
