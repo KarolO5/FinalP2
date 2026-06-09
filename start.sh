@@ -33,9 +33,11 @@ echo "=== Iniciando web_viz  http://${ROBOT_IP}:8080 ==="
 ros2 run straight_line web_viz &
 sleep 1
 
-echo "=== Iniciando RPLiDAR A1 ==="
-stty -F /dev/rplidar 115200 raw -crtscts -hupcl clocal 2>/dev/null
-python3 ~/FinalP2/puzzlebot_ws/src/straight_line/straight_line/lidar_preinit.py
+echo "=== Iniciando RPLiDAR A1 (power cycle via authorized) ==="
+echo 0 | sudo tee /sys/bus/usb/devices/3-1/authorized > /dev/null
+sleep 3
+echo 1 | sudo tee /sys/bus/usb/devices/3-1/authorized > /dev/null
+sleep 3
 ros2 run rplidar_ros rplidar_composition \
     --ros-args \
     -p channel_type:=serial \
