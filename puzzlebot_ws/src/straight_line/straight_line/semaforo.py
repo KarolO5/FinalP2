@@ -34,7 +34,7 @@ YELLOW_LO = np.array([ 18, 100,  80]); YELLOW_HI = np.array([ 35, 255, 255])
 GREEN_LO  = np.array([ 40,  80,  60]); GREEN_HI  = np.array([ 90, 255, 255])
 
 # Minimo 20% del ROI para confirmar color
-MIN_ROI_FRACTION = 0.20
+MIN_ROI_FRACTION = 0.04
 
 
 class SemaforoNode(Node):

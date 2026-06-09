@@ -16,7 +16,7 @@ ROBOT_IP=$(hostname -I | awk '{print $1}')
 echo "=== Iniciando RPLiDAR A1 ==="
 ros2 run rplidar_ros rplidar_composition \
     --ros-args \
-    -p serial_port:=/dev/rplidar \
+    -p serial_port:=/dev/ttyUSB1 \
     -p serial_baudrate:=115200 \
     -p frame_id:=laser \
     -p angle_compensate:=true &
